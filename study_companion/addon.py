@@ -119,6 +119,8 @@ class Controller:
         self.client = SupabaseClient()
         self.sync_in_flight = False
         self.sync_pending = False
+        self._member_cache_key = None
+        self._last_member_fetch_at = 0
         self.identity_in_flight = False
         self.identity_generation = 0
         self.closed = False
@@ -300,6 +302,20 @@ class Controller:
             self.review_history.observe(
                 collection_key, today, rows_by_day[today], allow_removals=allow_removals
             )
+            auth = self.online.get("auth") or {}
+            group = self.online.get("group") or {}
+            if auth.get("user_id") and group.get("id"):
+                self.review_history.mark_route_days(
+                    auth["user_id"],
+                    group["id"],
+                    collection_key,
+                    [yesterday, today],
+                    since_day=yesterday,
+                )
+            self.review_history.compact(
+                (current.date() - timedelta(days=2)).isoformat(),
+                discard_unrouted=not bool(group),
+            )
             self._weekly_activity = {
                 "day": today,
                 "collection_key": str(collection_key),
@@ -390,6 +406,7 @@ class Controller:
 
     def set_panel_collapsed(self, collapsed, *, persist=True):
         collapsed = bool(collapsed)
+        was_hidden = not self.panel.isVisible()
         if collapsed:
             current_width = self.panel.width()
             if self.panel.isVisible() and current_width >= 160:
@@ -409,6 +426,8 @@ class Controller:
         self.ui_state["panel_collapsed"] = collapsed
         if persist:
             self.save()
+        if not collapsed and was_hidden and persist:
+            self.sync_async(force=True)
 
     def refresh_panel(self):
         self.action.setText(self.t("스터디 관리", "Study settings"))
@@ -609,10 +628,16 @@ class Controller:
         """Forget only snapshots belonging to a room the account has left."""
         removed = self.sync_outbox.discard_room(str(user_id), str(group_id))
         self.review_history.invalidate_route(str(user_id), str(group_id))
+        published_deck = self.online.get("published_deck")
+        if isinstance(published_deck, dict) and published_deck.get("group_id") == str(group_id):
+            self.online.pop("published_deck", None)
         self.save()
         return removed
 
     def sync_async(self, force=False):
+        from datetime import timedelta
+        import time as clock_module
+
         if self.closed:
             return
         if self.sync_in_flight:
@@ -629,17 +654,56 @@ class Controller:
         group = dict(self.online.get("group") or {})
         group_id = group.get("id")
         current = now()
+        study_day = current.date().isoformat()
         record = self.tracker.today(current)
         payloads = []
-        review_payloads = self.review_history.pending(auth["user_id"], group_id) if group else []
+        recent_review_day = (current.date() - timedelta(days=1)).isoformat()
+        review_payloads = (
+            self.review_history.pending(
+                auth["user_id"], group_id, since_day=recent_review_day
+            )
+            if group else []
+        )
         review_acks = []
         current_deck_name = (
             self.tracker.current_deck_name
             if self.online.get("share_deck_name", False) and self.tracker.status == "studying"
             else None
         )
+        published_deck = self.online.get("published_deck")
+        published_deck_matches = isinstance(published_deck, dict) and all(
+            published_deck.get(key) == value
+            for key, value in {
+                "user_id": auth["user_id"],
+                "group_id": group_id,
+                "device_id": self.device_id,
+                "name": current_deck_name,
+            }.items()
+        )
+        deck_published_at = (
+            float(published_deck.get("published_at", 0) or 0)
+            if isinstance(published_deck, dict) else 0
+        )
+        clock_now = clock_module.time()
+        deck_publish_age = clock_now - deck_published_at
+        publish_deck = bool(group) and (
+            not published_deck_matches
+            or (
+                current_deck_name is not None
+                and (deck_publish_age < 0 or deck_publish_age >= 60)
+            )
+        )
+        member_cache_key = (auth["user_id"], group_id, study_day)
+        last_member_fetch = float(getattr(self, "_last_member_fetch_at", 0) or 0)
+        member_fetch_age = clock_now - last_member_fetch
+        fetch_members = bool(group) and (
+            force
+            or getattr(self, "_member_cache_key", None) != member_cache_key
+            or not isinstance(self.online.get("members"), list)
+            or member_fetch_age < 0
+            or member_fetch_age >= 90
+        )
         if group:
-            study_day = current.date().isoformat()
             previous_route = self.sync_outbox.route(self.device_id)
             # Local Anki totals are shared across rooms. Namespace the device
             # ledger by room so joining another room starts at the current
@@ -760,14 +824,24 @@ class Controller:
                     self.client.upsert_profile(token, auth["user_id"], display_name)
                 acknowledgements = []
                 first_error = None
-                for batch in review_payloads:
+                ordered_review_payloads = sorted(
+                    review_payloads,
+                    key=lambda batch: (
+                        batch.get("target_day") != study_day,
+                        str(batch.get("target_day", "")),
+                    ),
+                )
+                for batch in ordered_review_payloads:
                     try:
                         self.client.sync_review_day(token, group_id=group_id, batch=batch)
                         review_acks.append(batch)
                     except SupabaseError as error:
                         if error.status == 401:
                             raise
-                        first_error = error
+                        if first_error is None:
+                            first_error = error
+                        if "review day archived" in str(error).casefold():
+                            continue
                         break
                     except Exception as error:
                         first_error = error
@@ -797,21 +871,36 @@ class Controller:
                     except Exception as error:
                         if first_error is None:
                             first_error = error
-                if group:
+                deck_published = False
+                if publish_deck:
                     try:
                         self.client.set_current_deck(token, group_id, self.device_id, current_deck_name)
+                        deck_published = True
                     except SupabaseError as error:
                         if error.status == 401:
                             raise
                         if first_error is None:
                             first_error = error
-                members = self.client.fetch_group_today(token, group_id, study_day) if group else []
-                return acknowledgements, members, first_error
+                members = None
+                if fetch_members:
+                    try:
+                        members = self.client.fetch_group_today(token, group_id, study_day)
+                    except SupabaseError as error:
+                        if error.status == 401:
+                            raise
+                        if first_error is None:
+                            first_error = error
+                    except Exception as error:
+                        # Upload acknowledgements remain valid even when the
+                        # independent member-list read fails afterwards.
+                        if first_error is None:
+                            first_error = error
+                return acknowledgements, members, deck_published, first_error
             try:
-                acknowledgements, members, upload_error = upload(token)
+                acknowledgements, members, deck_published, upload_error = upload(token)
             except SupabaseError as error:
                 if error.status != 401 or not auth.get("refresh_token"):
-                    return auth, [], None, error
+                    return auth, [], None, False, error
                 try:
                     refreshed = self.client.refresh(auth["refresh_token"])
                     auth.update(
@@ -827,14 +916,14 @@ class Controller:
                         }
                     )
                     token = auth["access_token"]
-                    acknowledgements, members, upload_error = upload(token)
+                    acknowledgements, members, deck_published, upload_error = upload(token)
                 except SupabaseError as refresh_error:
                     if refresh_error.status in (400, 401):
                         refresh_error = SupabaseError("로그인이 만료되었습니다.", status=401)
-                    return auth, [], None, refresh_error
+                    return auth, [], None, False, refresh_error
             except Exception as error:
-                return auth, [], None, error
-            return auth, acknowledgements, members, upload_error
+                return auth, [], None, False, error
+            return auth, acknowledgements, members, deck_published, upload_error
 
         def done(future):
             self.sync_in_flight = False
@@ -854,10 +943,19 @@ class Controller:
                     QTimer.singleShot(0, lambda: self.sync_async(force=True))
                 return
             try:
-                updated_auth, acknowledgements, members, sync_error = future.result()
+                (
+                    updated_auth,
+                    acknowledgements,
+                    members,
+                    deck_published,
+                    sync_error,
+                ) = future.result()
                 self.online["auth"] = updated_auth
                 for batch in review_acks:
                     self.review_history.acknowledge(auth["user_id"], group_id, batch)
+                self.review_history.compact(
+                    (current.date() - timedelta(days=2)).isoformat()
+                )
                 for acknowledged_payload, acknowledged_revision in acknowledgements:
                     if isinstance(acknowledged_revision, DeviceSnapshotConflict):
                         baseline = recovery_baselines[acknowledged_payload["study_day"]]
@@ -885,7 +983,18 @@ class Controller:
                         acknowledged_payload, acknowledged_revision
                     )
                 self.online["display_name"] = display_name
-                self.online["members"] = members
+                if deck_published:
+                    self.online["published_deck"] = {
+                        "user_id": auth["user_id"],
+                        "group_id": group_id,
+                        "device_id": self.device_id,
+                        "name": current_deck_name,
+                        "published_at": clock_module.time(),
+                    }
+                if members is not None:
+                    self.online["members"] = members
+                    self._member_cache_key = member_cache_key
+                    self._last_member_fetch_at = clock_module.time()
                 if sync_error is not None:
                     self.online["last_error"] = str(sync_error)
                 else:

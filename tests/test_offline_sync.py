@@ -2,8 +2,9 @@ import ast
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from study_companion.online import DeviceSyncLedger, SupabaseError, DeviceSnapshotConflict
 from study_companion.outbox import SyncOutbox
@@ -14,7 +15,11 @@ class FakeClient:
     def __init__(self):
         self.calls = []
         self.deck_calls = []
+        self.member_calls = []
+        self.review_calls = []
         self.fail_days = set()
+        self.review_fail_days = set()
+        self.member_error = None
 
     def upsert_profile(self, token, user_id, display_name):
         return None
@@ -26,6 +31,9 @@ class FakeClient:
         return {"revision": payload["revision"]}
 
     def fetch_group_today(self, token, group_id, study_day):
+        self.member_calls.append((token, group_id, study_day))
+        if self.member_error is not None:
+            raise self.member_error
         return []
 
     def set_current_deck(self, token, group_id, device_id, deck_name):
@@ -33,6 +41,9 @@ class FakeClient:
         return None
 
     def sync_review_day(self, token, *, group_id, batch):
+        self.review_calls.append((token, group_id, batch["target_day"]))
+        if batch["target_day"] in self.review_fail_days:
+            raise SupabaseError("review day archived", status=400)
         return None
 
 
@@ -107,6 +118,7 @@ class OfflineSyncTests(unittest.TestCase):
         controller.client = FakeClient()
         controller.save = Mock()
         controller.t = lambda ko, en: ko
+        controller._last_member_fetch_at = 0
         self.controller = controller
 
     def finish_background(self):
@@ -147,6 +159,196 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertEqual(
             self.controller.client.deck_calls[-1],
             ("room-a", "device-a", "English"),
+        )
+
+    def test_unchanged_deck_and_recent_members_skip_redundant_requests(self):
+        self.controller.online["published_deck"] = {
+            "user_id": "user-a",
+            "group_id": "room-a",
+            "device_id": "device-a",
+            "name": None,
+            "published_at": 30,
+        }
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 1
+
+        with patch.object(time, "time", return_value=60):
+            self.controller.sync_async()
+            task, _done = self.take_background()
+            _auth, _acks, members, deck_published, _error = task()
+
+        self.assertEqual(self.controller.client.deck_calls, [])
+        self.assertIsNone(members)
+        self.assertFalse(deck_published)
+
+    def test_unchanged_deck_is_republished_before_server_ttl_expires(self):
+        self.controller.online["share_deck_name"] = True
+        self.controller.online["published_deck"] = {
+            "user_id": "user-a",
+            "group_id": "room-a",
+            "device_id": "device-a",
+            "name": "English",
+            "published_at": 30,
+        }
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 30
+
+        with patch.object(time, "time", return_value=91):
+            self.controller.sync_async()
+            task, _done = self.take_background()
+            _auth, _acks, members, deck_published, _error = task()
+
+        self.assertEqual(
+            self.controller.client.deck_calls,
+            [("room-a", "device-a", "English")],
+        )
+        self.assertIsNone(members)
+        self.assertTrue(deck_published)
+
+    def test_cleared_deck_does_not_need_a_ttl_heartbeat(self):
+        self.controller.online["published_deck"] = {
+            "user_id": "user-a",
+            "group_id": "room-a",
+            "device_id": "device-a",
+            "name": None,
+            "published_at": 1,
+        }
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 1
+        with patch.object(time, "time", return_value=1000):
+            self.controller.sync_async()
+            task, _done = self.take_background()
+            _auth, _acks, _members, deck_published, _error = task()
+
+        self.assertEqual(self.controller.client.deck_calls, [])
+        self.assertFalse(deck_published)
+
+    def test_force_refresh_ignores_a_fresh_member_cache(self):
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 100
+
+        with patch.object(time, "time", return_value=101):
+            self.controller.sync_async(force=True)
+            task, _done = self.take_background()
+            _auth, _acks, members, _deck_published, _error = task()
+
+        self.assertEqual(members, [])
+        self.assertEqual(
+            self.controller.client.member_calls,
+            [("token", "room-a", "2026-10-04")],
+        )
+
+    def test_clock_rollback_refreshes_members_instead_of_freezing_cache(self):
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 500
+
+        with patch.object(time, "time", return_value=100):
+            self.controller.sync_async()
+            task, _done = self.take_background()
+            _auth, _acks, members, _deck_published, _error = task()
+
+        self.assertEqual(members, [])
+        self.assertEqual(len(self.controller.client.member_calls), 1)
+
+    def test_account_change_invalidates_member_and_deck_cache(self):
+        self.controller.online["auth"] = {
+            "user_id": "user-b", "access_token": "token-b"
+        }
+        self.controller.online["members"] = [{"user_id": "old-friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 100
+        self.controller.online["published_deck"] = {
+            "user_id": "user-a",
+            "group_id": "room-a",
+            "device_id": "device-a",
+            "name": None,
+            "published_at": 100,
+        }
+
+        with patch.object(time, "time", return_value=101):
+            self.controller.sync_async()
+            task, _done = self.take_background()
+            _auth, _acks, members, deck_published, _error = task()
+
+        self.assertEqual(members, [])
+        self.assertTrue(deck_published)
+        self.assertEqual(self.controller.client.deck_calls, [("room-a", "device-a", None)])
+
+    def test_member_read_failure_does_not_discard_successful_upload_acks(self):
+        self.controller.review_history.observe(
+            "collection", "2026-10-04", [(100, 200, 2500, 3, 1)]
+        )
+        self.controller.client.member_error = SupabaseError("read offline", status=503)
+
+        self.controller.sync_async(force=True)
+        self.finish_background()
+
+        self.assertEqual(
+            self.controller.review_history.pending("user-a", "room-a"), []
+        )
+        self.assertEqual(
+            self.controller.sync_outbox.pending(
+                user_id="user-a", group_id="room-a", device_id="device-a"
+            ),
+            [],
+        )
+        self.assertEqual(self.controller.online["last_error"], "read offline")
+
+    def test_unauthorized_member_read_refreshes_session_once(self):
+        self.controller.online["auth"].update(
+            {"refresh_token": "refresh", "expires_at": int(time.time()) + 3600}
+        )
+        self.controller.client.fetch_group_today = Mock(
+            side_effect=[SupabaseError("expired", status=401), []]
+        )
+        self.controller.client.refresh = Mock(
+            return_value={
+                "access_token": "fresh-token",
+                "refresh_token": "fresh-refresh",
+                "expires_at": int(time.time()) + 7200,
+            }
+        )
+
+        self.controller.sync_async(force=True)
+        self.finish_background()
+
+        self.controller.client.refresh.assert_called_once_with("refresh")
+        self.assertEqual(
+            [call.args[0] for call in self.controller.client.fetch_group_today.call_args_list],
+            ["token", "fresh-token"],
+        )
+        self.assertEqual(
+            self.controller.online["auth"]["access_token"], "fresh-token"
+        )
+
+    def test_archived_old_review_does_not_block_today_and_stays_pending(self):
+        self.controller.review_history.observe(
+            "collection", "2026-01-01", [(1, 10, 1000, 3, 1)]
+        )
+        self.controller.review_history.observe(
+            "collection", "2026-10-04", [(2, 20, 2000, 3, 1)]
+        )
+        self.controller.review_history.pending("user-a", "room-a")
+        self.controller.client.review_fail_days.add("2026-01-01")
+
+        self.controller.sync_async(force=True)
+        self.finish_background()
+
+        self.assertEqual(
+            [day for _token, _room, day in self.controller.client.review_calls],
+            ["2026-10-04", "2026-01-01"],
+        )
+        self.assertEqual(
+            [
+                batch["target_day"]
+                for batch in self.controller.review_history.pending("user-a", "room-a")
+            ],
+            ["2026-01-01"],
         )
 
     def test_partial_failure_acks_success_and_keeps_only_failed_day(self):

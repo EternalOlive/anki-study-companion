@@ -12,6 +12,122 @@ def row(review_id, card_id=None, time_ms=1000, ease=3, review_type=1):
 
 
 class ReviewHistoryTests(unittest.TestCase):
+    def test_new_room_only_sends_recent_days(self):
+        history = ReviewHistory({}, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+        history.observe("collection", "2026-10-03", [(2, 20, 600, 3, 1)])
+
+        pending = history.pending("user", "new-room", since_day="2026-10-03")
+
+        self.assertEqual([batch["target_day"] for batch in pending], ["2026-10-03"])
+
+    def test_old_attempted_day_is_retried_outside_recent_window(self):
+        history = ReviewHistory({}, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+        first = history.pending("user", "room")
+        self.assertEqual(first[0]["target_day"], "2026-09-01")
+
+        retry = history.pending("user", "room", since_day="2026-10-03")
+
+        self.assertEqual(retry, first)
+
+    def test_new_route_keeps_its_original_sharing_boundary(self):
+        history = ReviewHistory({}, now_ms=lambda: 100)
+        history.observe("collection", "2026-10-03", [(1, 10, 500, 3, 1)])
+        history.pending("user", "room", since_day="2026-10-03")
+        history.observe("collection", "2026-10-04", [(2, 20, 600, 3, 1)])
+
+        history.pending("user", "room", since_day="2026-10-04")
+
+        self.assertEqual(
+            history.state["routes"]["user"]["room"]["sources"]["collection"]["since_day"],
+            "2026-10-03",
+        )
+
+    def test_legacy_route_without_boundary_preserves_ambiguous_old_days(self):
+        state = {
+            "collections": {},
+            "routes": {
+                "user": {"room": {"sources": {"collection": {"days": {}}}}}
+            },
+        }
+        history = ReviewHistory(state, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+
+        pending = history.pending("user", "room", since_day="2026-10-03")
+
+        self.assertEqual([batch["target_day"] for batch in pending], ["2026-09-01"])
+        self.assertEqual(
+            history.state["routes"]["user"]["room"]["sources"]["collection"]["since_day"],
+            "2026-09-01",
+        )
+
+    def test_legacy_route_boundary_is_preserved_when_refresh_marks_recent_days(self):
+        state = {
+            "collections": {},
+            "routes": {
+                "user": {"room": {"sources": {"collection": {"days": {}}}}}
+            },
+        }
+        history = ReviewHistory(state, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+        history.observe("collection", "2026-10-03", [(2, 20, 600, 3, 1)])
+
+        history.mark_route_days(
+            "user",
+            "room",
+            "collection",
+            ["2026-10-03"],
+            since_day="2026-10-03",
+        )
+        pending = history.pending("user", "room", since_day="2026-10-03")
+
+        self.assertEqual(
+            [batch["target_day"] for batch in pending],
+            ["2026-09-01", "2026-10-03"],
+        )
+
+    def test_compact_removes_only_fully_acknowledged_old_days(self):
+        history = ReviewHistory({}, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+        history.observe("collection", "2026-09-02", [(2, 20, 600, 3, 1)])
+        old_batches = history.pending("user", "room")
+        history.acknowledge("user", "room", old_batches[0])
+
+        removed = history.compact("2026-10-01")
+
+        self.assertEqual(removed, 1)
+        self.assertNotIn(
+            "2026-09-01",
+            history.state["collections"]["collection"]["days"],
+        )
+        self.assertIn(
+            "2026-09-02",
+            history.state["collections"]["collection"]["days"],
+        )
+
+    def test_unattempted_room_day_survives_compaction_and_retries(self):
+        history = ReviewHistory({}, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+        history.mark_route_days(
+            "user", "room", "collection", ["2026-09-01"]
+        )
+
+        removed = history.compact("2026-10-01")
+        retry = history.pending("user", "room", since_day="2026-10-03")
+
+        self.assertEqual(removed, 0)
+        self.assertEqual([batch["target_day"] for batch in retry], ["2026-09-01"])
+
+    def test_unrouted_local_cache_can_be_compacted(self):
+        history = ReviewHistory({}, now_ms=lambda: 100)
+        history.observe("collection", "2026-09-01", [(1, 10, 500, 3, 1)])
+
+        removed = history.compact("2026-10-01", discard_unrouted=True)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(history.state["collections"], {})
+
     def test_repeated_observation_and_mobile_additions_are_deduplicated(self):
         history = ReviewHistory({})
         history.observe("collection", DAY, [row(1, time_ms=1500)])

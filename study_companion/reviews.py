@@ -122,7 +122,12 @@ class ReviewHistory:
             return None
         return {"seconds": total_ms / 1000, "answers": answers}
 
-    def pending(self, user_id: str, group_id: str) -> list[dict[str, Any]]:
+    def pending(
+        self,
+        user_id: str,
+        group_id: str,
+        since_day: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return unsent review changes for one account/room route.
 
         Batches contain no more than 500 review additions and removals in
@@ -135,9 +140,28 @@ class ReviewHistory:
             source_state = self.state["collections"].get(source)
             if not isinstance(source_state, dict):
                 continue
+            existing_source = route["sources"].get(source)
             route_source = route["sources"].setdefault(source, {"days": {}})
             route_days = route_source.setdefault("days", {})
+            if since_day is not None and "since_day" not in route_source:
+                if isinstance(existing_source, dict):
+                    # A route written by an older add-on may contain delivery
+                    # state but no sharing boundary. Preserve ambiguous local
+                    # history rather than silently skipping it during upgrade.
+                    observed_days = source_state.get("days", {})
+                    route_source["since_day"] = min(
+                        (str(day) for day in observed_days),
+                        default=str(since_day),
+                    )
+                else:
+                    route_source["since_day"] = str(since_day)
+            route_since_day = route_source.get("since_day")
             for day in sorted(source_state.get("days", {})):
+                # A newly joined room only needs the recent sharing window.
+                # An older day already attempted for this route is still
+                # retried so an extended offline period never loses data.
+                if route_since_day is not None and day < str(route_since_day) and day not in route_days:
+                    continue
                 day_state = source_state["days"].get(day)
                 if not isinstance(day_state, dict) or not day_state.get("observed"):
                     continue
@@ -183,6 +207,109 @@ class ReviewHistory:
                 if not reviews and not removals and not ack.get("activated"):
                     batches.append(_batch(source, day, [], []))
         return batches
+
+    def mark_route_days(
+        self,
+        user_id: str,
+        group_id: str,
+        source: str,
+        days: list[str],
+        *,
+        since_day: str | None = None,
+    ) -> None:
+        """Protect locally observed room days until delivery is acknowledged."""
+        source_state = self.state["collections"].get(str(source), {})
+        observed_days = source_state.get("days", {})
+        route = self._route_state(str(user_id), str(group_id))
+        source_key = str(source)
+        existing_source = route["sources"].get(source_key)
+        route_source = route["sources"].setdefault(source_key, {"days": {}})
+        if since_day is not None and "since_day" not in route_source:
+            route_source["since_day"] = (
+                min((str(day) for day in observed_days), default=str(since_day))
+                if isinstance(existing_source, dict)
+                else str(since_day)
+            )
+        route_days = route_source.setdefault("days", {})
+        for day in days:
+            target_day = str(day)
+            day_state = observed_days.get(target_day)
+            if not isinstance(day_state, dict) or not day_state.get("observed"):
+                continue
+            route_days.setdefault(
+                target_day,
+                {"reviews": {}, "removed": {}, "activated": False},
+            )
+
+    def compact(self, before_day: str, *, discard_unrouted: bool = False) -> int:
+        """Discard old local cache days that have no unfinished delivery.
+
+        Native Anki revlog remains the source of truth.  A day is retained if
+        any existing room route has an unacknowledged activation, review, or
+        removal for it.  Routes created later do not make historical days
+        pending retroactively.
+        """
+        cutoff = str(before_day)
+        removed_days = 0
+        collections = self.state.get("collections", {})
+        routes = self.state.get("routes", {})
+        for source, source_state in list(collections.items()):
+            if not isinstance(source_state, dict):
+                continue
+            days = source_state.get("days", {})
+            if not isinstance(days, dict):
+                continue
+            for day, day_state in list(days.items()):
+                if day >= cutoff or not isinstance(day_state, dict):
+                    continue
+                acknowledgements = []
+                route_can_require_delivery = False
+                for groups in routes.values():
+                    if not isinstance(groups, dict):
+                        continue
+                    for route in groups.values():
+                        if not isinstance(route, dict):
+                            continue
+                        route_source = route.get("sources", {}).get(source, {})
+                        if not isinstance(route_source, dict):
+                            continue
+                        if not route_source:
+                            route_can_require_delivery = True
+                            continue
+                        route_day = route_source.get("days", {}).get(day)
+                        if isinstance(route_day, dict):
+                            acknowledgements.append(route_day)
+                            continue
+                        route_since_day = route_source.get("since_day")
+                        if route_since_day is None or day >= str(route_since_day):
+                            route_can_require_delivery = True
+                if route_can_require_delivery:
+                    continue
+                if not acknowledgements and not discard_unrouted and not routes:
+                    continue
+                if any(
+                    not _fully_acknowledged(day_state, acknowledgement)
+                    for acknowledgement in acknowledgements
+                ):
+                    continue
+                days.pop(day, None)
+                removed_days += 1
+                for groups in routes.values():
+                    if not isinstance(groups, dict):
+                        continue
+                    for route in groups.values():
+                        if not isinstance(route, dict):
+                            continue
+                        route_days = (
+                            route.get("sources", {})
+                            .get(source, {})
+                            .get("days", {})
+                        )
+                        if isinstance(route_days, dict):
+                            route_days.pop(day, None)
+            if not days:
+                collections.pop(source, None)
+        return removed_days
 
     def acknowledge(
         self,
@@ -318,3 +445,25 @@ def _integer(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError, OverflowError):
         return 0
+
+
+def _fully_acknowledged(
+    day_state: dict[str, Any], acknowledgement: dict[str, Any]
+) -> bool:
+    if not acknowledgement.get("activated"):
+        return False
+    acknowledged_reviews = acknowledgement.get("reviews", {})
+    acknowledged_removals = acknowledgement.get("removed", {})
+    for event_key, event in day_state.get("events", {}).items():
+        expected = {
+            "time_ms": max(0, _integer(event.get("time_ms"))),
+            "changed_at": max(0, _integer(event.get("changed_at"))),
+        }
+        if acknowledged_reviews.get(event_key) != expected:
+            return False
+    for event_key, event in day_state.get("removed", {}).items():
+        if acknowledged_removals.get(event_key) != max(
+            0, _integer(event.get("changed_at"))
+        ):
+            return False
+    return True

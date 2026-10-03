@@ -2,6 +2,8 @@
 
 방 중심 UI와 한국어·영어 설정을 구현했습니다. 설계 기준은 [DESIGN.md](DESIGN.md)에 정리했습니다.
 
+현재 베타 버전은 `0.1.0`입니다. 변경 내역은 [CHANGELOG.md](CHANGELOG.md), 실제 기기 배포 확인 항목은 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)를 참고하세요.
+
 현재 구현된 기능은 다음과 같습니다.
 
 - 오늘 공부량은 Anki 복습 기록의 답변 횟수와 저장된 답변 시간 합계로 표시

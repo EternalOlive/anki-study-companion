@@ -1,5 +1,40 @@
 # Device sync activation
 
+## Review retention (prepared, not deployed)
+
+Apply `migrations/20261004_review_retention.sql` after synced review totals.
+It keeps the current Asia/Seoul day and the preceding 89 calendar days as
+mutable raw review events. Older observed collection-days can be frozen into
+private `anki_review_day_archives` rows containing only answer count and total
+milliseconds; the raw event and tombstone rows are then deleted in the same
+transaction.
+
+`archive_review_days(retain_days, max_days)` is executable only by
+`service_role`, refuses retention shorter than 90 days, processes at most 5,000
+collection-days per call, and defaults to 500. Each candidate marker is locked
+before aggregation. `sync_review_day` takes the same marker lock and returns the
+unchanged receipt shape for mutable dates. Once a marker is archived, later
+uploads and undo requests fail explicitly with `review day archived`; they are
+never acknowledged or allowed to recreate raw rows. A previously unseen old
+date may still be uploaded and will be frozen by a later maintenance call.
+
+`get_group_device_stats` reads archives for frozen collection-days and raw rows
+for mutable collection-days, then sums collections once per user. Archive rows
+remain inaccessible to clients and are deleted through the existing membership
+cascade when a user leaves a room.
+
+Run `tests/review_retention.sql` in a disposable or rolled-back real PostgreSQL
+transaction before deployment. Also race an old-date `sync_review_day` call
+against `archive_review_days` from two connections: one operation must wait or
+skip the locked marker, and the final state must be either mutable raw rows or
+one frozen archive, never both.
+
+No schedule is installed by the migration. If `pg_cron` is already enabled,
+schedule a small daily service-owned call only after deployment verification,
+for example `select public.archive_review_days(90, 500);`. Keep scheduling as a
+separate operational step so the first destructive cleanup is observable and
+reversible from a database backup.
+
 ## Native Anki review totals (2026-10-04)
 
 `migrations/20261004_synced_review_totals.sql` is now applied to production.
