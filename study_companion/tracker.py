@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from .study_day import DEFAULT_TIME_ZONE, split_interval, study_day
+
 
 TIMEZONE = timezone(timedelta(hours=9))
 IDLE_AFTER = timedelta(minutes=1)
@@ -56,11 +58,22 @@ class StudyTracker:
         deck_records=None,
         time_goal_minutes=0,
         card_goal=0,
+        time_zone=DEFAULT_TIME_ZONE,
+        record_namespaces=None,
     ):
-        self.records = records or {}
-        self.deck_records = deck_records or {}
+        self.record_namespaces = record_namespaces or {}
+        namespace = f"room-04-v1|{time_zone}"
+        if namespace not in self.record_namespaces:
+            self.record_namespaces[namespace] = {
+                "records": records or {},
+                "deck_records": deck_records or {},
+            }
+        active = self.record_namespaces[namespace]
+        self.records = active.setdefault("records", {})
+        self.deck_records = active.setdefault("deck_records", {})
         self.time_goal_minutes = time_goal_minutes
         self.card_goal = card_goal
+        self.time_zone = str(time_zone or DEFAULT_TIME_ZONE)
         self.status = "stopped"
         self.last_input_at = None
         self.counted_until = None
@@ -95,9 +108,10 @@ class StudyTracker:
             self.status = "studying"
             self.counted_until = now
         self.last_input_at = now
-        self._record(now.date().isoformat())["answers"] += 1
+        day = study_day(now, self.time_zone).isoformat()
+        self._record(day)["answers"] += 1
         if self.current_deck_id:
-            self._deck_record(now.date().isoformat())["answers"] += 1
+            self._deck_record(day)["answers"] += 1
 
     def pause(self, now: datetime) -> None:
         self.tick(now)
@@ -116,30 +130,33 @@ class StudyTracker:
         deadline = self.last_input_at + IDLE_AFTER
         end = min(now, deadline)
         cursor = self.counted_until
-        while cursor < end:
-            next_day = datetime.combine(
-                cursor.date() + timedelta(days=1), datetime.min.time(), cursor.tzinfo
-            )
-            segment_end = min(end, next_day)
-            self._record(cursor.date().isoformat())["seconds"] += (
-                segment_end - cursor
-            ).total_seconds()
+        for day, seconds in split_interval(cursor, end, self.time_zone):
+            self._record(day)["seconds"] += seconds
             if self.current_deck_id:
-                self._deck_record(cursor.date().isoformat())["seconds"] += (
-                    segment_end - cursor
-                ).total_seconds()
-            cursor = segment_end
+                self._deck_record(day)["seconds"] += seconds
         self.counted_until = end
         if now >= deadline:
             self.status = "paused"
 
     def today(self, now: datetime) -> dict:
-        return self._record(now.date().isoformat()).copy()
+        return self._record(study_day(now, self.time_zone).isoformat()).copy()
 
     def today_deck(self, now: datetime) -> dict | None:
         if not self.current_deck_id:
             return None
-        return self._deck_record(now.date().isoformat()).copy()
+        return self._deck_record(study_day(now, self.time_zone).isoformat()).copy()
+
+    def set_time_zone(self, time_zone: str) -> None:
+        """Use the room time zone for future study-day classification."""
+        target = str(time_zone or DEFAULT_TIME_ZONE)
+        namespace = f"room-04-v1|{target}"
+        active = self.record_namespaces.setdefault(
+            namespace,
+            {"records": {}, "deck_records": {}},
+        )
+        self.time_zone = target
+        self.records = active.setdefault("records", {})
+        self.deck_records = active.setdefault("deck_records", {})
 
     def snapshot(self) -> dict:
         return {
@@ -147,6 +164,8 @@ class StudyTracker:
             "deck_records": self.deck_records,
             "time_goal_minutes": self.time_goal_minutes,
             "card_goal": self.card_goal,
+            "study_time_zone": self.time_zone,
+            "record_namespaces": self.record_namespaces,
         }
 
     def _record(self, day: str) -> dict:

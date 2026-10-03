@@ -357,12 +357,12 @@ class SupabaseClient:
         )
         return self._first(result)
 
-    def create_group(self, token: str, name: str) -> dict[str, Any] | None:
+    def create_group(self, token: str, name: str, timezone_name: str = "Asia/Seoul") -> dict[str, Any] | None:
         result = self._request(
             "POST",
             "/rest/v1/rpc/create_study_group",
             token=token,
-            body={"group_name": name},
+            body={"group_name": name, "room_timezone": timezone_name},
         )
         created = self._first(result)
         if not created:
@@ -371,6 +371,8 @@ class SupabaseClient:
             "id": created.get("id") or created.get("group_id"),
             "name": name,
             "invite_code": created.get("invite_code"),
+            "time_zone": created.get("time_zone") or timezone_name,
+            "day_start_hour": 4,
         }
 
     def join_group(self, token: str, code: str) -> Any:
@@ -498,7 +500,7 @@ class SupabaseClient:
             query={
                 "select": (
                     "group_id,joined_at,"
-                    "study_groups(id,name,invite_code,owner_id,created_at)"
+                    "study_groups(id,name,invite_code,owner_id,created_at,time_zone,day_start_hour)"
                 ),
                 "user_id": f"eq.{user_id}",
                 "order": "joined_at.asc",

@@ -68,13 +68,15 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    def create_group(self, token, name):
-        self.calls.append(("create_group", token, name))
+    def create_group(self, token, name, time_zone):
+        self.calls.append(("create_group", token, name, time_zone))
         return {
             "id": "room-created",
             "name": name,
             "invite_code": "C7K9",
             "owner_id": "user-local",
+            "time_zone": time_zone,
+            "day_start_hour": 4,
         }
 
     def join_group(self, token, code):
@@ -92,6 +94,8 @@ class FakeClient:
                 "name": "Quiet room",
                 "invite_code": "TMQV",
                 "owner_id": "user-owner",
+                "time_zone": "Asia/Seoul",
+                "day_start_hour": 4,
             }
         ]
 
@@ -213,6 +217,7 @@ class FakeController:
         self.identity_attempts = 0
         self.cancelled_identity = 0
         self.discarded_outboxes = []
+        self.applied_time_zones = []
         self.pending = None
 
     def _access_token(self):
@@ -235,6 +240,9 @@ class FakeController:
 
     def discard_room_outbox(self, user_id, group_id):
         self.discarded_outboxes.append((user_id, group_id))
+
+    def apply_room_time_zone(self, time_zone):
+        self.applied_time_zones.append(time_zone)
 
     def _store_session(self, result, email, display_name):
         user = result.get("user") or {}
@@ -336,7 +344,7 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     home_text = _visible_text(dialog, QtWidgets)
     assert "오늘" not in home_text and "Today" not in home_text
     assert "멤버" not in home_text and "Members" not in home_text
-    assert "UTC+9" in home_text
+    assert "04:00" in home_text
     assert "Card contents are not shared" in home_text
     assert not re.search(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
@@ -366,6 +374,27 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
 
 
 def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
+    create_controller = FakeController()
+    create_dialog = _fresh_dialog(SettingsDialog, create_controller)
+    _button(create_dialog, QtWidgets, "새 방 만들기").click()
+    app.processEvents()
+    create_dialog.group_name.setText("Morning room")
+    create_dialog.room_time_zone.setCurrentText("America/New_York")
+    assert "04:00" in create_dialog.room_time_zone.toolTip()
+    create_dialog.create_group()
+    assert create_controller.pending is not None
+    create_controller.finish_remote()
+    app.processEvents()
+    assert create_controller.client.calls[0] == (
+        "create_group", "token", "Morning room", "America/New_York"
+    )
+    assert create_controller.online["group"]["time_zone"] == "America/New_York"
+    assert create_controller.applied_time_zones == ["America/New_York"]
+    assert create_dialog.pages.currentIndex() == create_dialog.PAGE_HOME
+    assert "America/New_York · 04:00" in _visible_text(create_dialog, QtWidgets)
+    assert not create_dialog.room_time_zone.isVisible()
+    create_dialog.close()
+
     controller = FakeController()
     dialog = _fresh_dialog(SettingsDialog, controller)
     app.processEvents()
@@ -375,7 +404,8 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert dialog.pages.currentIndex() == dialog.PAGE_CREATE
     assert dialog.group_name.isVisible()
     assert not dialog.invite_code.isVisible()
-    assert "UTC+9" in _visible_text(dialog, QtWidgets)
+    assert dialog.room_time_zone.isVisible()
+    assert "04:00" in _visible_text(dialog, QtWidgets)
     assert "카드 내용은 공유하지 않습니다" in _visible_text(dialog, QtWidgets)
     dialog.show_home()
 
@@ -384,7 +414,7 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert dialog.pages.currentIndex() == dialog.PAGE_JOIN
     assert dialog.invite_code.isVisible()
     assert not dialog.group_name.isVisible()
-    assert "UTC+9" in _visible_text(dialog, QtWidgets)
+    assert "04:00" in _visible_text(dialog, QtWidgets)
     assert "카드 내용은 공유하지 않습니다" in _visible_text(dialog, QtWidgets)
 
     dialog.invite_code.setText("O1l0")
@@ -408,6 +438,7 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     controller.finish_remote()
     app.processEvents()
     assert controller.online["group"]["id"] == "room-joined"
+    assert controller.applied_time_zones == ["Asia/Seoul"]
     assert dialog.pages.currentIndex() == dialog.PAGE_HOME
     assert controller.client.calls[0] == ("join_group", "token", "TMQV")
 
@@ -434,6 +465,7 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert dialog.pages.currentIndex() == dialog.PAGE_HOME
     assert controller.client.calls[-1] == ("leave_group", "token", "room-joined")
     assert controller.discarded_outboxes == [("user-local", "room-joined")]
+    assert controller.applied_time_zones[-1] == "Asia/Seoul"
     assert _button(dialog, QtWidgets, "초대 코드로 참여").isVisible()
     dialog.close()
 

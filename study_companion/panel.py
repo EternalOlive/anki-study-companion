@@ -29,6 +29,12 @@ from aqt.qt import (
 )
 
 from .history import get_comparison
+from .study_day import (
+    DAY_START_HOUR,
+    room_datetime,
+    room_time_zone as get_room_time_zone,
+    study_day as room_study_day,
+)
 from .tracker import TIMEZONE, answers_per_minute
 
 
@@ -98,11 +104,16 @@ class ActivityTimeline(QWidget):
         self.setMouseTracking(True)
 
     def update_activity(self, member: dict) -> None:
-        study_day = member.get("study_day")
-        matches_today = study_day is None or str(study_day) == _now().date().isoformat()
+        member_day = member.get("study_day")
+        matches_today = (
+            member_day is None
+            or str(member_day) == self.panel.current_room_day().isoformat()
+        )
         self.known = member.get("activity_known") is True and matches_today
         self.error = bool(member.get("activity_error")) and matches_today
-        record_key = (member.get("user_id"), study_day)
+        record_key = (
+            member.get("user_id"), member_day, self.panel.room_time_zone()
+        )
         previous_buckets = self.buckets if record_key == self._record_key else {}
         if record_key != self._record_key:
             self.selected_slot = None
@@ -142,22 +153,23 @@ class ActivityTimeline(QWidget):
             summary = self.panel.tr("오늘 답변 기록 없음", "No answers recorded today")
         else:
             summary = self.panel.tr("오늘 활동: ", "Today's activity: ") + "; ".join(descriptions)
-        summary += self.panel.tr(" · 한국 시간(UTC+9)", " · UTC+9")
+        summary += f" · {self.panel.room_day_label()}"
         self.setAccessibleName(summary)
         self.setToolTip(summary)
         self.update()
 
     def _description(self, slot: int) -> str:
         bucket = self.buckets[slot]
-        start_minutes = slot * 15
-        end_minutes = start_minutes + 15
+        start_minutes = (DAY_START_HOUR * 60 + slot * 15) % (24 * 60)
+        end_minutes = (start_minutes + 15) % (24 * 60)
         start = f"{start_minutes // 60:02d}:{start_minutes % 60:02d}"
-        end = "24:00" if end_minutes == 1440 else f"{end_minutes // 60:02d}:{end_minutes % 60:02d}"
+        end = f"{end_minutes // 60:02d}:{end_minutes % 60:02d}"
         answers = bucket["answer_count"]
         duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
+        time_zone = self.panel.room_time_zone()
         return self.panel.tr(
-            f"{start}–{end} (UTC+9) · {answers}회 · 기록 시간 {duration}",
-            f"{start}–{end} (UTC+9) · {answers} answers · recorded time {duration}",
+            f"{start}–{end} ({time_zone}) · {answers}회 · 기록 시간 {duration}",
+            f"{start}–{end} ({time_zone}) · {answers} answers · recorded time {duration}",
         )
 
     def _slot_at(self, x: int) -> int | None:
@@ -246,7 +258,8 @@ class ActivityTimeline(QWidget):
             if self.selected_slot in self.buckets:
                 slot = self.selected_slot
                 bucket = self.buckets[slot]
-                start, end = slot * 15, (slot + 1) * 15
+                start = (DAY_START_HOUR * 60 + slot * 15) % (24 * 60)
+                end = (start + 15) % (24 * 60)
                 period = f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
                 duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
                 answers = bucket["answer_count"]
@@ -269,7 +282,7 @@ class ActivityTimeline(QWidget):
                 empty,
             )
         painter.setPen(muted)
-        labels = ((0, "00"), (24, "06"), (48, "12"), (72, "18"), (96, "24"))
+        labels = ((0, "04"), (24, "10"), (48, "16"), (72, "22"), (96, "04"))
         width = max(1, self.width() - 2)
         for slot, label in labels:
             x = 1 + round(slot * width / 96)
@@ -732,8 +745,8 @@ class StudyPanel(QWidget):
         self.weekly_title = QLabel(self.history_body)
         _set_font(self.weekly_title, bold=True)
         self.weekly_title.setToolTip(self.tr(
-            "이 PC에 동기화된 Anki 복습 기록 · 한국 시간(UTC+9)",
-            "Anki review history synced to this PC · UTC+9",
+            f"이 PC에 동기화된 Anki 복습 기록 · {self.room_day_label()}",
+            f"Anki review history synced to this PC · {self.room_day_label()}",
         ))
         history_layout.addWidget(self.weekly_title)
         self.weekly_bars = QWidget(self.history_body)
@@ -883,6 +896,15 @@ class StudyPanel(QWidget):
             return translate(ko, en)
         return en if getattr(self.controller, "locale", "ko") == "en" else ko
 
+    def room_time_zone(self) -> str:
+        return get_room_time_zone(self.controller.online.get("group"))
+
+    def room_day_label(self) -> str:
+        return f"{self.room_time_zone()} · {DAY_START_HOUR:02d}:00"
+
+    def current_room_day(self, current: datetime | None = None):
+        return room_study_day(current or _now(), self.room_time_zone())
+
     def _separator(self) -> QFrame:
         line = QFrame(self)
         line.setFrameShape(QFrame.Shape.HLine)
@@ -946,7 +968,7 @@ class StudyPanel(QWidget):
             return self.tr("확인 전", "Not checked")
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-            return parsed.astimezone(TIMEZONE).strftime("%H:%M")
+            return room_datetime(parsed, self.room_time_zone()).strftime("%H:%M")
         except (TypeError, ValueError):
             return self.tr("확인 전", "Not checked")
 
@@ -1069,8 +1091,8 @@ class StudyPanel(QWidget):
     def _refresh_weekly(self, current: datetime) -> None:
         self.weekly_title.setText(self.tr("최근 7일", "Recent 7 days"))
         self.weekly_title.setToolTip(self.tr(
-            "이 PC에 동기화된 Anki 복습 기록 · 한국 시간(UTC+9)",
-            "Anki review history synced to this PC · UTC+9",
+            f"이 PC에 동기화된 Anki 복습 기록 · {self.room_day_label()}",
+            f"Anki review history synced to this PC · {self.room_day_label()}",
         ))
         getter = getattr(self.controller, "weekly_record", None)
         record = getter(current) if callable(getter) else None
@@ -1085,7 +1107,7 @@ class StudyPanel(QWidget):
             return
 
         maximum = max(1, *(max(0, int(day.get("answers") or 0)) for day in days))
-        today = current.date().isoformat()
+        today = self.current_room_day(current).isoformat()
         for button, day in zip(self.weekly_days, days):
             button.set_day(day, maximum, today)
 
@@ -1128,12 +1150,14 @@ class StudyPanel(QWidget):
         if record.get("as_of"):
             try:
                 parsed = datetime.fromisoformat(str(record["as_of"]).replace("Z", "+00:00"))
-                checked = parsed.astimezone(TIMEZONE).strftime("%m/%d %H:%M")
+                checked = room_datetime(parsed, self.room_time_zone()).strftime("%m/%d %H:%M")
             except (TypeError, ValueError):
                 pass
         cutoff = self.tr(
-            f"마지막 확인 {checked} (UTC+9)" if checked else "마지막 확인 시각(UTC+9)",
-            f"Last checked {checked} (UTC+9)" if checked else "Last checked time (UTC+9)",
+            f"마지막 확인 {checked} ({self.room_time_zone()})" if checked
+            else f"마지막 확인 시각 ({self.room_time_zone()})",
+            f"Last checked {checked} ({self.room_time_zone()})" if checked
+            else f"Last checked time ({self.room_time_zone()})",
         )
         self.weekly_summary.setToolTip(comparison_text + "\n" + self.tr(
             f"{cutoff} 기준으로 최근 7일과 이전 7일을 비교합니다.",
@@ -1216,7 +1240,7 @@ class StudyPanel(QWidget):
         if group:
             room_name = str(group.get("name") or self.tr("스터디방", "Study room"))
             self.room_name.setText(_allow_anywhere_wrap(room_name))
-            self.room_name.setToolTip(room_name)
+            self.room_name.setToolTip(f"{room_name}\n{self.room_day_label()}")
             members_known = raw_members is not None
             members = [
                 member
@@ -1255,7 +1279,7 @@ class StudyPanel(QWidget):
         )
         my_total = next((member for member in (raw_members or [])
                          if member.get("user_id") == my_id
-                         and member.get("study_day") == current.date().isoformat()), None)
+                         and member.get("study_day") == self.current_room_day(current).isoformat()), None)
         self._update_own_activity_label()
         self.own_activity_toggle.setVisible(bool(group))
         self.own_activity_timeline.setVisible(
@@ -1264,8 +1288,8 @@ class StudyPanel(QWidget):
         self.own_activity_timeline.update_activity(my_total or {})
         self.own_title.setToolTip(
             self.tr(
-                "Anki 복습 기록 기준 · 한국 시간 자정(UTC+9)\n모바일 기록은 모바일과 PC의 Anki 동기화 후 반영됩니다.\n시간은 Anki가 저장한 답변 시간이며 실행 중인 타이머가 아닙니다.",
-                "Anki review history · resets at midnight UTC+9\nMobile reviews appear after syncing Anki on mobile and PC.\nTime is recorded answer time, not a running stopwatch.",
+                f"Anki 복습 기록 기준 · {self.room_day_label()}에 새 공부일 시작\n모바일 기록은 모바일과 PC의 Anki 동기화 후 반영됩니다.\n시간은 Anki가 저장한 답변 시간이며 실행 중인 타이머가 아닙니다.",
+                f"Anki review history · new study day at {self.room_day_label()}\nMobile reviews appear after syncing Anki on mobile and PC.\nTime is recorded answer time, not a running stopwatch.",
             )
         )
         own_status = self.status_text(

@@ -35,6 +35,13 @@ from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickn
 from .outbox import SyncOutbox
 from .activity import weekly_activity
 from .reviews import ReviewHistory
+from .study_day import (
+    DEFAULT_TIME_ZONE,
+    current_day_bounds,
+    day_bounds,
+    room_time_zone,
+    study_day,
+)
 from .panel import PanelToggleButton, StudyPanel
 from .tracker import (
     StudyTracker,
@@ -81,14 +88,32 @@ class Controller:
             data = json.loads(self.path.read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError, OSError):
             data = {}
+        self.online = data.get("online", {})
+        initial_time_zone = room_time_zone(self.online.get("group"))
+        self.study_day_scheme = f"room-04-v1|{initial_time_zone}"
+        previous_scheme = data.get("study_day_scheme")
+        self.legacy_tracker_records = data.get("legacy_tracker_records", {})
+        tracker_records = data.get("records")
+        tracker_deck_records = data.get("deck_records")
+        if previous_scheme != self.study_day_scheme:
+            if tracker_records or tracker_deck_records:
+                legacy_key = str(previous_scheme or "calendar-midnight-v0")
+                self.legacy_tracker_records.setdefault(
+                    legacy_key,
+                    {"records": tracker_records or {}, "deck_records": tracker_deck_records or {}},
+                )
+            tracker_records = {}
+            tracker_deck_records = {}
         self.tracker = StudyTracker(
-            records=data.get("records"),
-            deck_records=data.get("deck_records"),
+            records=tracker_records,
+            deck_records=tracker_deck_records,
             time_goal_minutes=data.get("time_goal_minutes", 0),
             card_goal=data.get("card_goal", 0),
+            time_zone=initial_time_zone,
+            record_namespaces=data.get("record_namespaces"),
         )
-        self.online = data.get("online", {})
         self.review_history = ReviewHistory(data.get("review_history", {}))
+        self.review_history.migrate_study_days(initial_time_zone)
         self._weekly_activity = None
         self.review_dirty = True
         self.review_query_in_flight = False
@@ -166,6 +191,8 @@ class Controller:
         data["language"] = self.locale
         data["ui_state"] = self.ui_state
         data["review_history"] = self.review_history.state
+        data["study_day_scheme"] = self.study_day_scheme
+        data["legacy_tracker_records"] = self.legacy_tracker_records
         payload = json.dumps(data, ensure_ascii=False)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(payload, encoding="utf-8")
@@ -173,7 +200,10 @@ class Controller:
 
     def tick(self):
         self.tracker.tick(now())
-        if self.review_dirty or self.review_history.today(now().date().isoformat()) is None:
+        current = now()
+        if self.review_dirty or self.review_history.today(
+            study_day(current, self.tracker.time_zone).isoformat()
+        ) is None:
             self.refresh_review_history()
         self.ticks_since_save += 1
         if self.ticks_since_save >= 30:
@@ -231,13 +261,17 @@ class Controller:
         self.refresh_panel()
 
     def study_record(self, current):
-        return self.review_history.today(current.date().isoformat()) or {"seconds": 0, "answers": 0}
+        day = study_day(current, self.tracker.time_zone).isoformat()
+        return self.review_history.today(day) or {"seconds": 0, "answers": 0}
 
     def weekly_record(self, current):
+        from study_companion.study_day import DEFAULT_TIME_ZONE, study_day
+
         snapshot = self._weekly_activity
         if not isinstance(snapshot, dict):
             return None
-        if snapshot.get("day") != current.date().isoformat():
+        time_zone = getattr(getattr(self, "tracker", None), "time_zone", DEFAULT_TIME_ZONE)
+        if snapshot.get("day") != study_day(current, time_zone).isoformat():
             return None
         current_collection = getattr(mw, "col", None)
         if current_collection is None:
@@ -257,14 +291,23 @@ class Controller:
         if self.closed or self.review_query_in_flight or self.review_syncing or not mw.col:
             return
         from aqt.operations import QueryOp
+        from datetime import timezone as datetime_timezone
+        from study_companion.study_day import (
+            DEFAULT_TIME_ZONE,
+            current_day_bounds,
+            day_bounds,
+            study_day,
+        )
 
         current = now()
-        today = current.date().isoformat()
-        today_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
-        start = today_start - timedelta(days=13)
-        yesterday = (today_start - timedelta(days=1)).date().isoformat()
+        time_zone = getattr(getattr(self, "tracker", None), "time_zone", DEFAULT_TIME_ZONE)
+        today_date, _today_start, end = current_day_bounds(current, time_zone)
+        today = today_date.isoformat()
+        yesterday_date = today_date - timedelta(days=1)
+        yesterday = yesterday_date.isoformat()
+        start, _ = day_bounds(today_date - timedelta(days=13), time_zone)
         start_ms = int(start.timestamp() * 1000)
-        end_ms = int((today_start + timedelta(days=1)).timestamp() * 1000)
+        end_ms = int(end.timestamp() * 1000)
         self.review_dirty = False
         self.review_query_in_flight = True
         allow_removals = self.review_allow_removals
@@ -278,24 +321,40 @@ class Controller:
                 start_ms, end_ms,
             )
             aggregate_current = now()
-            if aggregate_current.date() != current.date():
+            if study_day(aggregate_current, time_zone) != today_date:
                 # Keep the snapshot on the queried day. The next timer tick
                 # immediately issues the new day's correctly bounded query.
                 aggregate_current = current
             return (
                 str(col.crt), id(col), rows,
-                weekly_activity(rows, aggregate_current),
+                weekly_activity(rows, aggregate_current, time_zone),
             )
 
         def success(result):
             self.review_query_in_flight = False
             if self.closed:
                 return
+            if getattr(getattr(self, "tracker", None), "time_zone", DEFAULT_TIME_ZONE) != time_zone:
+                # A room switch changed the calendar while this queued Anki
+                # read was running. Discard its old-boundary snapshot and let
+                # the next tick issue a correctly bounded query.
+                self.review_dirty = True
+                self.review_allow_removals |= allow_removals
+                self.review_upload_requested |= upload_requested
+                return
             collection_key, collection_identity, rows, weekly = result
+            if mw.col is None or id(mw.col) != collection_identity:
+                self.review_dirty = True
+                self.review_allow_removals |= allow_removals
+                self.review_upload_requested |= upload_requested
+                return
             rows_by_day = {yesterday: [], today: []}
             for row in rows:
                 try:
-                    row_day = datetime.fromtimestamp(int(row[0]) / 1000, TIMEZONE).date().isoformat()
+                    row_day = study_day(
+                        datetime.fromtimestamp(int(row[0]) / 1000, datetime_timezone.utc),
+                        time_zone,
+                    ).isoformat()
                 except (IndexError, TypeError, ValueError, OverflowError, OSError):
                     continue
                 if row_day in rows_by_day:
@@ -315,7 +374,7 @@ class Controller:
                     since_day=yesterday,
                 )
             self.review_history.compact(
-                (current.date() - timedelta(days=2)).isoformat(),
+                (today_date - timedelta(days=2)).isoformat(),
                 discard_unrouted=not bool(group),
             )
             self._weekly_activity = {
@@ -344,12 +403,27 @@ class Controller:
                 self.review_dirty = True
                 self.review_allow_removals |= allow_removals
                 self.review_upload_requested |= upload_requested
-                self.online["review_error"] = self.t("Anki 학습 기록을 읽지 못했습니다", "Could not read Anki review history")
+            self.online["review_error"] = self.t("Anki 학습 기록을 읽지 못했습니다", "Could not read Anki review history")
 
         try:
             QueryOp(parent=mw, op=query, success=success).failure(failure).run_in_background()
         except Exception as error:
             failure(error)
+
+    def apply_room_time_zone(self, time_zone, current=None):
+        """Rotate live counters and re-key cached reviews when rooms change zone."""
+        target = str(time_zone or DEFAULT_TIME_ZONE)
+        if target == self.tracker.time_zone:
+            return False
+        current = current or now()
+        self.tracker.tick(current)
+        self.tracker.set_time_zone(target)
+        self.study_day_scheme = f"room-04-v1|{target}"
+        self.review_history.migrate_study_days(target)
+        self._weekly_activity = None
+        self.review_dirty = True
+        self.review_upload_requested = True
+        return True
 
     def t(self, korean, english):
         return english if self.locale == "en" else korean
@@ -641,6 +715,11 @@ class Controller:
     def sync_async(self, force=False):
         from datetime import timedelta
         import time as clock_module
+        from study_companion.study_day import (
+            DEFAULT_TIME_ZONE,
+            room_time_zone,
+            study_day,
+        )
 
         if self.closed:
             return
@@ -674,10 +753,16 @@ class Controller:
         group = dict(self.online.get("group") or {})
         group_id = group.get("id")
         current = now()
-        study_day = current.date().isoformat()
+        apply_time_zone = getattr(self, "apply_room_time_zone", None)
+        if apply_time_zone is not None:
+            apply_time_zone(room_time_zone(group), current)
+        time_zone = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
+        study_day_key = study_day(current, time_zone).isoformat()
         record = self.tracker.today(current)
         payloads = []
-        recent_review_day = (current.date() - timedelta(days=1)).isoformat()
+        recent_review_day = (
+            study_day(current, time_zone) - timedelta(days=1)
+        ).isoformat()
         review_payloads = (
             self.review_history.pending(
                 auth["user_id"], group_id, since_day=recent_review_day
@@ -713,7 +798,7 @@ class Controller:
                 and (deck_publish_age < 0 or deck_publish_age >= 60)
             )
         )
-        member_cache_key = (auth["user_id"], group_id, study_day)
+        member_cache_key = (auth["user_id"], group_id, study_day_key)
         last_member_fetch = float(getattr(self, "_last_member_fetch_at", 0) or 0)
         member_fetch_age = clock_now - last_member_fetch
         panel = getattr(self, "panel", None)
@@ -754,7 +839,7 @@ class Controller:
                 ledger_id = auth["user_id"]
             if (
                 same_route
-                and previous_route.get("study_day") != study_day
+                and previous_route.get("study_day") != study_day_key
             ):
                 previous_day = previous_route["study_day"]
                 previous_record = self.tracker.records.get(previous_day)
@@ -779,7 +864,7 @@ class Controller:
                     self.sync_outbox.enqueue(previous_payload)
             device_snapshot = self.device_ledger.prepare(
                 user_id=ledger_id,
-                day=study_day,
+                day=study_day_key,
                 active_seconds=int(record["seconds"]),
                 answer_count=int(record["answers"]),
                 time_goal_minutes=self.tracker.time_goal_minutes,
@@ -790,14 +875,14 @@ class Controller:
                 "user_id": auth["user_id"],
                 "group_id": group["id"],
                 "device_id": self.device_id,
-                "study_day": study_day,
+                "study_day": study_day_key,
                 "ledger_id": ledger_id,
                 **device_snapshot,
             }
             self.sync_outbox.enqueue(payload)
             self.sync_outbox.bind_route(
                 user_id=auth["user_id"], group_id=group_id,
-                device_id=self.device_id, study_day=study_day, ledger_id=ledger_id,
+                device_id=self.device_id, study_day=study_day_key, ledger_id=ledger_id,
             )
             payloads = self.sync_outbox.pending(
                 user_id=auth["user_id"], group_id=group_id,
@@ -849,7 +934,7 @@ class Controller:
                 ordered_review_payloads = sorted(
                     review_payloads,
                     key=lambda batch: (
-                        batch.get("target_day") != study_day,
+                        batch.get("target_day") != study_day_key,
                         str(batch.get("target_day", "")),
                     ),
                 )
@@ -906,7 +991,7 @@ class Controller:
                 members = None
                 if fetch_members:
                     try:
-                        members = self.client.fetch_group_today(token, group_id, study_day)
+                        members = self.client.fetch_group_today(token, group_id, study_day_key)
                     except SupabaseError as error:
                         if error.status == 401:
                             raise
@@ -958,6 +1043,7 @@ class Controller:
                 or self.online.get("auth", {}).get("user_id") != auth["user_id"]
                 or current_token != session_token
                 or current_group_id != group_id
+                or getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE) != time_zone
                 or (group_id and current_route_epoch != sync_route_epoch)
             ):
                 if self.sync_pending and not self.closed:
@@ -976,7 +1062,10 @@ class Controller:
                 for batch in review_acks:
                     self.review_history.acknowledge(auth["user_id"], group_id, batch)
                 self.review_history.compact(
-                    (current.date() - timedelta(days=2)).isoformat()
+                    (
+                        study_day(current, time_zone)
+                        - timedelta(days=2)
+                    ).isoformat()
                 )
                 for acknowledged_payload, acknowledged_revision in acknowledgements:
                     if isinstance(acknowledged_revision, DeviceSnapshotConflict):

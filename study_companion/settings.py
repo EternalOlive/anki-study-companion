@@ -25,6 +25,7 @@ from aqt.qt import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
+    QTimeZone,
     QTimer,
     Qt,
     QVBoxLayout,
@@ -33,6 +34,36 @@ from aqt.qt import (
 
 from .nicknames import canonical_nickname
 from .online import SupabaseError
+from .study_day import DAY_START_HOUR, DEFAULT_TIME_ZONE, room_time_zone
+
+
+def _time_zone_text(value):
+    """Return a Qt time-zone identifier as plain text."""
+
+    if hasattr(value, "data"):
+        value = value.data()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    return str(value or "")
+
+
+def _available_time_zones():
+    zones = sorted({
+        name for name in map(_time_zone_text, QTimeZone.availableTimeZoneIds())
+        if name
+    })
+    return zones or [DEFAULT_TIME_ZONE]
+
+
+def _system_time_zone_name(zones):
+    current = _time_zone_text(QTimeZone.systemTimeZoneId())
+    return current if current in zones else DEFAULT_TIME_ZONE
+
+
+def _apply_group_time_zone(controller, group):
+    apply = getattr(controller, "apply_room_time_zone", None)
+    if callable(apply):
+        apply(room_time_zone(group))
 
 
 def _clear_layout(layout):
@@ -169,9 +200,9 @@ class SettingsDialog(QDialog):
             self._note(
                 self._t(
                     "방 멤버는 공부 시간·답변 수·오늘 답변 시간대·공부 중 상태를 볼 수 있습니다. "
-                    "방의 하루는 한국 시간(UTC+9) 자정에 바뀝니다.",
+                    "방의 하루는 방에서 정한 시간대의 04:00에 바뀝니다.",
                     "Room members can see your study time, answer count, today's answer activity, and studying status. "
-                    "The room day resets at Korean midnight (UTC+9).",
+                    "The room day resets at 04:00 in the room's time zone.",
                 )
             )
         )
@@ -298,6 +329,23 @@ class SettingsDialog(QDialog):
         self.group_name.setObjectName("groupName")
         self.group_name.setMaxLength(80)
         form.addRow(self._t("방 이름", "Room name"), self.group_name)
+        self.room_time_zone = QComboBox(page)
+        self.room_time_zone.setObjectName("roomTimeZone")
+        self.room_time_zone.setEditable(True)
+        self.room_time_zone.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.room_time_zone.setMaxVisibleItems(16)
+        time_zones = _available_time_zones()
+        self.room_time_zone.addItems(time_zones)
+        selected_zone = _system_time_zone_name(time_zones)
+        selected_index = self.room_time_zone.findText(selected_zone)
+        self.room_time_zone.setCurrentIndex(max(0, selected_index))
+        self.room_time_zone.setToolTip(
+            self._t(
+                "이 방의 기록은 선택한 시간대의 04:00에 새로 시작합니다. 방을 만든 뒤에는 바꿀 수 없습니다.",
+                "Room records reset at 04:00 in this time zone. It cannot be changed after creation.",
+            )
+        )
+        form.addRow(self._t("시간대", "Time zone"), self.room_time_zone)
         layout.addLayout(form)
         self.create_error = self._error_label()
         layout.addWidget(self.create_error)
@@ -332,10 +380,10 @@ class SettingsDialog(QDialog):
             self._t(
                 "방에 참여하면 공부 시간·답변 수·오늘 답변 시간대·공부 중 상태가 멤버에게 공유됩니다. "
                 "선택한 경우에만 덱 이름도 공유하며, 카드 내용은 공유하지 않습니다. "
-                "방의 하루는 한국 시간(UTC+9) 자정에 바뀝니다.",
+                "방의 하루는 방에서 정한 시간대의 04:00에 바뀝니다.",
                 "Creating or joining a room shares your study time, answer count, today's answer activity, and studying status "
                 "with its members. Your deck name is shared only when enabled; card contents are not shared. "
-                "The room day resets at Korean midnight (UTC+9).",
+                "The room day resets at 04:00 in the room's time zone.",
             ),
             parent,
         )
@@ -577,6 +625,8 @@ class SettingsDialog(QDialog):
             group.get("name"),
             group.get("invite_code"),
             group.get("owner_id"),
+            group.get("time_zone"),
+            group.get("day_start_hour"),
             online.get("display_name"),
             online.get("account_kind"),
             online.get("email"),
@@ -604,6 +654,8 @@ class SettingsDialog(QDialog):
         self.rotate_invite_button = None
         group = self.controller.online.get("group")
         if group:
+            time_zone = str(group.get("time_zone") or DEFAULT_TIME_ZONE)
+            day_label = f"{time_zone} · {DAY_START_HOUR:02d}:00"
             name = QLabel(
                 str(group.get("name") or self._t("친구 그룹", "Study room")), self
             )
@@ -612,7 +664,14 @@ class SettingsDialog(QDialog):
             font.setBold(True)
             name.setFont(font)
             name.setWordWrap(True)
+            name.setToolTip(self._t(
+                f"방 시간대 {time_zone} · 매일 {DAY_START_HOUR:02d}:00 기록 초기화",
+                f"Room time zone {time_zone} · records reset daily at {DAY_START_HOUR:02d}:00",
+            ))
             self.room_layout.addWidget(name)
+            day = QLabel(day_label, self)
+            day.setToolTip(name.toolTip())
+            self.room_layout.addWidget(day)
             row = QHBoxLayout()
             code = str(group.get("invite_code") or "—")
             self.room_invite_code = QLabel(code, self)
@@ -1199,6 +1258,13 @@ class SettingsDialog(QDialog):
                 self._t("방 이름을 입력해 주세요.", "Enter a room name."),
             )
             return
+        time_zone = self.room_time_zone.currentText().strip()
+        if time_zone not in _available_time_zones():
+            self._set_message(
+                self.create_error,
+                self._t("목록에서 시간대를 선택해 주세요.", "Choose a time zone from the list."),
+            )
+            return
         if not self._begin_remote(self.create_error):
             return
 
@@ -1220,6 +1286,7 @@ class SettingsDialog(QDialog):
                 (self.controller.online.get("auth") or {}).get("user_id"),
             )
             self.controller.online["group"] = group
+            _apply_group_time_zone(self.controller, group)
             self.controller.save()
             self.controller.sync_async(force=True)
             if self._valid():
@@ -1227,7 +1294,7 @@ class SettingsDialog(QDialog):
 
         self.controller._run_authenticated_action(
             [self.create_submit],
-            lambda token: self.controller.client.create_group(token, name),
+            lambda token: self.controller.client.create_group(token, name, time_zone),
             success,
             self._t("방을 만들지 못했습니다.", "Could not create the room."),
             on_error=self._remote_error(
@@ -1268,7 +1335,7 @@ class SettingsDialog(QDialog):
         def success(value):
             self._finish_remote()
             group_id, groups = value
-            self.controller.online["group"] = next(
+            group = next(
                 (item for item in groups if item.get("id") == group_id),
                 {
                     "id": group_id,
@@ -1276,6 +1343,8 @@ class SettingsDialog(QDialog):
                     "invite_code": code,
                 },
             )
+            self.controller.online["group"] = group
+            _apply_group_time_zone(self.controller, group)
             self.controller.save()
             self.controller.sync_async(force=True)
             if self._valid():
@@ -1310,6 +1379,7 @@ class SettingsDialog(QDialog):
                     self.controller.discard_room_outbox(user_id, group_id)
                 self.controller.online.pop("group", None)
                 self.controller.online.pop("members", None)
+                _apply_group_time_zone(self.controller, None)
             self.controller.save()
             self.controller.refresh()
             if self._valid():
@@ -1515,6 +1585,9 @@ class SettingsDialog(QDialog):
             self.controller.online.pop("pending_email", None)
             if groups:
                 self.controller.online["group"] = groups[0]
+            _apply_group_time_zone(
+                self.controller, self.controller.online.get("group")
+            )
             self.controller.save()
             self.controller.sync_async(force=True)
             if self._valid():
@@ -1629,6 +1702,9 @@ class SettingsDialog(QDialog):
             self.controller.online.pop("pending_email", None)
             if groups:
                 self.controller.online["group"] = groups[0]
+            _apply_group_time_zone(
+                self.controller, self.controller.online.get("group")
+            )
             self.controller.save()
             self.controller.sync_async(force=True)
             if self._valid():

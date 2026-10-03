@@ -92,13 +92,23 @@ class StudyTrackerTest(unittest.TestCase):
         tracker.answer(moment(second=20))
         self.assertEqual(tracker.today(moment())["answers"], 2)
 
-    def test_time_splits_at_midnight(self):
+    def test_time_splits_at_room_four_am_boundary(self):
         tracker = StudyTracker()
-        start = datetime(2026, 9, 30, 23, 59, 50, tzinfo=TIMEZONE)
+        start = datetime(2026, 9, 30, 3, 59, 50, tzinfo=TIMEZONE)
         tracker.enter_review(start)
         tracker.tick(start + timedelta(seconds=20))
+        self.assertEqual(tracker.records["2026-09-29"]["seconds"], 10)
         self.assertEqual(tracker.records["2026-09-30"]["seconds"], 10)
-        self.assertEqual(tracker.records["2026-10-01"]["seconds"], 10)
+
+    def test_timezone_namespaces_restore_each_rooms_live_counters(self):
+        tracker = StudyTracker()
+        tracker._record("2026-09-30")["answers"] = 3
+        tracker.set_time_zone("UTC")
+        tracker._record("2026-09-30")["answers"] = 7
+        tracker.set_time_zone("Asia/Seoul")
+        self.assertEqual(tracker.records["2026-09-30"]["answers"], 3)
+        tracker.set_time_zone("UTC")
+        self.assertEqual(tracker.records["2026-09-30"]["answers"], 7)
 
 
 if __name__ == "__main__":

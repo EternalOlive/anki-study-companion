@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from .study_day import (
+    DEFAULT_TIME_ZONE,
+    day_bounds,
+    same_wall_time_on_day,
+    study_day,
+)
 
 
 VALID_EASES = {1, 2, 3, 4}
@@ -14,6 +21,7 @@ MAX_REVIEW_TIME_MS = 3_600_000
 def weekly_activity(
     rows: list[tuple[Any, Any, Any, Any, Any]],
     current: datetime,
+    time_zone: str = DEFAULT_TIME_ZONE,
 ) -> dict[str, Any]:
     """Aggregate a complete 14-day native review-log observation.
 
@@ -25,11 +33,11 @@ def weekly_activity(
     if current.tzinfo is None or current.utcoffset() is None:
         raise ValueError("current must be timezone-aware")
 
-    today = current.date()
+    today = study_day(current, time_zone)
     visible_start = today - timedelta(days=6)
     previous_start = today - timedelta(days=13)
-    previous_end = current - timedelta(days=7)
-    start_at = datetime.combine(previous_start, datetime.min.time(), current.tzinfo)
+    previous_end = same_wall_time_on_day(today - timedelta(days=7), current, time_zone)
+    start_at, _ = day_bounds(previous_start, time_zone)
     current_ms = int(current.timestamp() * 1000)
     previous_end_ms = int(previous_end.timestamp() * 1000)
     start_ms = int(start_at.timestamp() * 1000)
@@ -55,7 +63,7 @@ def weekly_activity(
         ):
             continue
         try:
-            answered_at = datetime.fromtimestamp(review_id / 1000, current.tzinfo)
+            answered_at = datetime.fromtimestamp(review_id / 1000, timezone.utc)
         except (ValueError, OverflowError, OSError):
             continue
         events[(review_id, card_id)] = (answered_at, time_ms)
@@ -71,7 +79,7 @@ def weekly_activity(
     previous_answers = 0
     previous_ms = 0
     for (review_id, _card_id), (answered_at, time_ms) in events.items():
-        day = answered_at.date()
+        day = study_day(answered_at, time_zone)
         if visible_start <= day <= today:
             item = daily[day.isoformat()]
             item["answers"] += 1

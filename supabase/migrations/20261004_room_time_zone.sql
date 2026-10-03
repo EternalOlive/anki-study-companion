@@ -122,7 +122,8 @@ create trigger study_groups_calendar_guard
 before insert or update on public.study_groups
 for each row execute function public.guard_study_group_calendar();
 
-revoke all on function public.guard_study_group_calendar() from public;
+revoke all on function public.guard_study_group_calendar()
+  from public, anon, authenticated;
 
 drop function if exists public.create_study_group(text);
 create or replace function public.create_study_group(

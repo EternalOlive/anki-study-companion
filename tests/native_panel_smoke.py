@@ -76,7 +76,12 @@ class FakeController:
         self.tracker = tracker
         self.locale = "ko"
         self.online = {
-            "group": {"id": "group-1", "name": "goyori"},
+            "group": {
+                "id": "group-1",
+                "name": "goyori",
+                "time_zone": "Asia/Seoul",
+                "day_start_hour": 4,
+            },
             "auth": {"user_id": "self"},
             "members": [
                 {
@@ -222,7 +227,8 @@ def main() -> int:
     assert panel.width() == 340
     assert first_row.details.isVisible()
     assert first_row.activity_timeline.isVisible()
-    assert "07:30–07:45" in first_row.activity_timeline.accessibleName()
+    assert "11:30–11:45" in first_row.activity_timeline.accessibleName()
+    assert "Asia/Seoul · 04:00" in first_row.activity_timeline.accessibleName()
     assert "4회" in first_row.activity_timeline.accessibleName()
     from PyQt6.QtCore import Qt, QPoint
     from PyQt6.QtTest import QTest
@@ -235,16 +241,26 @@ def main() -> int:
     QTest.mouseClick(timeline, Qt.MouseButton.LeftButton,
                      pos=QPoint(1 + round(30.5 * (timeline.width() - 2) / 96), 35))
     assert timeline.selected_slot == 30
-    assert "07:30–07:45" in timeline.accessibleDescription()
+    assert "11:30–11:45" in timeline.accessibleDescription()
     saved_buckets = dict(timeline.buckets)
     timeline.update_activity(dict(first_row.member, activity_error=True,
                                   activity_known=False, activity_buckets=[]))
     assert timeline.buckets == saved_buckets
+    controller.online["group"]["time_zone"] = "America/New_York"
+    timeline.update_activity(dict(
+        first_row.member,
+        study_day=panel.current_room_day().isoformat(),
+        activity_error=True,
+        activity_known=False,
+        activity_buckets=[],
+    ))
+    assert not timeline.buckets
+    controller.online["group"]["time_zone"] = "Asia/Seoul"
     timeline.update_activity(first_row.member)
     current_friend = first_row.member
     first_row.update_member(dict(current_friend, study_day=yesterday))
     assert "시간대 기록 없음" in first_row.activity_timeline.accessibleName()
-    assert "07:30–07:45" not in first_row.activity_timeline.accessibleName()
+    assert "11:30–11:45" not in first_row.activity_timeline.accessibleName()
     first_row.update_member(current_friend)
     assert "시간대 기록 없음" in panel.member_rows["friend-b"].activity_timeline.accessibleName()
     assert panel.history_body.isVisible()
@@ -271,7 +287,7 @@ def main() -> int:
     assert not panel.own_activity_timeline.isVisible()
     panel.own_activity_toggle.click()
     assert panel.own_activity_timeline.isVisible()
-    assert "07:30–07:45" in panel.own_activity_timeline.accessibleName()
+    assert "11:30–11:45" in panel.own_activity_timeline.accessibleName()
     mine["activity_error"] = True
     panel.refresh()
     assert "동기화 지연" in panel.own_activity_timeline.accessibleName()

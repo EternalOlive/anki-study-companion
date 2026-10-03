@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from typing import Any
+
+from .study_day import DEFAULT_TIME_ZONE, study_day
 
 
 MAX_BATCH_ITEMS = 500
@@ -33,6 +36,112 @@ class ReviewHistory:
         if not isinstance(self.state.get("routes"), dict):
             self.state["routes"] = {}
         self.state["version"] = 1
+
+    def migrate_study_days(
+        self,
+        time_zone: str = DEFAULT_TIME_ZONE,
+        *,
+        scheme: str = "room-04-v1",
+    ) -> bool:
+        """Re-key cached review events for the room's 04:00 study day.
+
+        Delivery acknowledgements refer to the old day keys, so they are
+        invalidated and the same stable review identities are offered again.
+        Review events and tombstones themselves are preserved.  The operation
+        is marker-guarded and therefore safe to call on every startup.
+        """
+        marker = f"{scheme}|{time_zone}"
+        if self.state.get("study_day_scheme") == marker:
+            return False
+
+        for source, source_state in self.state.get("collections", {}).items():
+            if not isinstance(source_state, dict):
+                continue
+            old_days = source_state.get("days", {})
+            if not isinstance(old_days, dict):
+                continue
+            new_days: dict[str, dict[str, Any]] = {}
+            destinations_by_old_day: dict[str, set[str]] = {}
+            for old_day, old_day_state in old_days.items():
+                if not isinstance(old_day_state, dict):
+                    continue
+                for bucket in ("events", "removed"):
+                    values = old_day_state.get(bucket, {})
+                    if not isinstance(values, dict):
+                        continue
+                    for event_key, event in values.items():
+                        if not isinstance(event, dict):
+                            continue
+                        try:
+                            instant = datetime.fromtimestamp(
+                                int(event["id"]) / 1000,
+                                timezone.utc,
+                            )
+                        except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                            continue
+                        target_day = study_day(instant, time_zone).isoformat()
+                        destinations_by_old_day.setdefault(str(old_day), set()).add(
+                            target_day
+                        )
+                        target = new_days.setdefault(
+                            target_day,
+                            {
+                                "observed": True,
+                                "events": {},
+                                "removed": {},
+                                "last_observed_keys": [],
+                            },
+                        )
+                        other_bucket = "removed" if bucket == "events" else "events"
+                        existing = target[bucket].get(event_key)
+                        opposing = target[other_bucket].get(event_key)
+                        incoming_version = _integer(event.get("changed_at"))
+                        newest_version = max(
+                            _integer(existing.get("changed_at"))
+                            if isinstance(existing, dict) else -1,
+                            _integer(opposing.get("changed_at"))
+                            if isinstance(opposing, dict) else -1,
+                        )
+                        if incoming_version >= newest_version:
+                            target[other_bucket].pop(event_key, None)
+                            target[bucket][event_key] = dict(event)
+            for target in new_days.values():
+                target["last_observed_keys"] = sorted(target["events"])
+            source_state["days"] = new_days
+            # Keep every account/room delivery scope and its original sharing
+            # boundary.  Day acknowledgements are reset because their keys
+            # described the old calendar, forcing stable review IDs to be
+            # resent while also preserving old offline pending work.
+            for groups in self.state.get("routes", {}).values():
+                if not isinstance(groups, dict):
+                    continue
+                for route in groups.values():
+                    if not isinstance(route, dict):
+                        continue
+                    route_source = route.get("sources", {}).get(str(source))
+                    if not isinstance(route_source, dict):
+                        continue
+                    previous_since = route_source.get("since_day")
+                    previously_routed = {
+                        str(day) for day in route_source.get("days", {})
+                    }
+                    eligible_old_days = previously_routed.union(
+                        str(day)
+                        for day in old_days
+                        if previous_since is None or str(day) >= str(previous_since)
+                    )
+                    eligible_destinations: set[str] = set()
+                    for old_day in eligible_old_days:
+                        eligible_destinations.update(
+                            destinations_by_old_day.get(old_day, set())
+                        )
+                    route_source["days"] = {
+                        day: {"reviews": {}, "removed": {}, "activated": False}
+                        for day in eligible_destinations
+                    }
+
+        self.state["study_day_scheme"] = marker
+        return True
 
     def observe(
         self,

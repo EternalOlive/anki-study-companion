@@ -157,10 +157,10 @@ class ReviewCollectionIntegrationTests(TestCase):
         result = operation.op(self.col)
 
         expected_start = int(
-            datetime(2026, 9, 21, 0, 0, tzinfo=KST).timestamp() * 1000
+            datetime(2026, 9, 21, 4, 0, tzinfo=KST).timestamp() * 1000
         )
         expected_end = int(
-            datetime(2026, 10, 5, 0, 0, tzinfo=KST).timestamp() * 1000
+            datetime(2026, 10, 5, 4, 0, tzinfo=KST).timestamp() * 1000
         )
         self.col.db.all.assert_called_once_with(
             "select id, cid, time, ease, type from revlog where id >= ? and id < ? order by id",
@@ -179,7 +179,7 @@ class ReviewCollectionIntegrationTests(TestCase):
         self.controller.sync_async.assert_called_once_with(force=True)
         self.assertEqual(self.controller._weekly_activity["record"]["answers"], 1)
 
-    def test_midnight_restart_recovers_the_previous_days_last_review(self):
+    def test_before_four_restart_keeps_reviews_in_the_open_study_day(self):
         self._install_query_op()
         self.current = datetime(2026, 10, 5, 0, 0, 30, tzinfo=KST)
         previous_review = datetime(2026, 10, 4, 23, 59, 58, tzinfo=KST)
@@ -196,14 +196,14 @@ class ReviewCollectionIntegrationTests(TestCase):
             {"seconds": 3.2, "answers": 1},
         )
         self.assertEqual(
-            self.controller.review_history.today("2026-10-05"),
+            self.controller.review_history.today("2026-10-03"),
             {"seconds": 0.0, "answers": 0},
         )
         pending_days = {
             batch["target_day"]
             for batch in self.controller.review_history.pending("user", "room")
         }
-        self.assertEqual(pending_days, {"2026-10-04", "2026-10-05"})
+        self.assertEqual(pending_days, {"2026-10-03", "2026-10-04"})
 
     def test_complete_empty_query_returns_known_zero_week(self):
         self._install_query_op()
@@ -235,6 +235,19 @@ class ReviewCollectionIntegrationTests(TestCase):
         weekly = self.controller._weekly_activity["record"]
         self.assertEqual(weekly["answers"], 1)
         self.assertEqual(weekly["as_of"], self.current.isoformat())
+
+    def test_timezone_change_discards_queued_old_boundary_result(self):
+        self._install_query_op()
+        self.controller.tracker = SimpleNamespace(time_zone="Asia/Seoul")
+        self.controller.refresh_review_history()
+        operation = _QueryOp.instances[0]
+
+        self.controller.tracker.time_zone = "UTC"
+        operation.success(operation.op(self.col))
+
+        self.assertTrue(self.controller.review_dirty)
+        self.controller.save.assert_not_called()
+        self.controller.sync_async.assert_not_called()
 
     def test_explicit_undo_removals_are_limited_to_today(self):
         self._install_query_op()
@@ -461,6 +474,17 @@ class ReviewDeliveryIntegrationTests(TestCase):
             self.controller.review_history.pending("user", "room"),
             "the current identity must still have an unacknowledged batch",
         )
+        self.assertNotIn("members", self.controller.online)
+
+    def test_timezone_change_never_acknowledges_old_day_callback(self):
+        self.controller.tracker.time_zone = "Asia/Seoul"
+        self.controller.sync_async()
+        task, done = self.scheduled[0]
+        value = task()
+        self.controller.tracker.time_zone = "UTC"
+        done(_Future(value))
+
+        self.assertTrue(self.controller.review_history.pending("user", "room"))
         self.assertNotIn("members", self.controller.online)
 
     def test_unauthorized_review_upload_refreshes_once_and_retries(self):

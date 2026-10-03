@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
+from .study_day import DEFAULT_TIME_ZONE, study_day
+
 
 TODAY_MIN_SECONDS = 5 * 60
 TODAY_MIN_ANSWERS = 10
@@ -17,6 +19,7 @@ def get_comparison(
     deck_id: str,
     now: datetime | date,
     mode: str = "yesterday",
+    time_zone: str = DEFAULT_TIME_ZONE,
 ) -> dict:
     """Compare today's same-deck average with one completed local day.
 
@@ -28,7 +31,7 @@ def get_comparison(
     if mode not in {"yesterday", "previous", "best"}:
         raise ValueError(f"unsupported comparison mode: {mode}")
 
-    today_date = now.date() if isinstance(now, datetime) else now
+    today_date = study_day(now, time_zone) if isinstance(now, datetime) else now
     deck_key = str(deck_id)
     today = _record_for(deck_records, deck_key, today_date)
     reference = _select_reference(deck_records, deck_key, today_date, mode)

@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from study_companion.reviews import MAX_BATCH_ITEMS, ReviewHistory
 
@@ -381,6 +382,73 @@ class ReviewHistoryTests(unittest.TestCase):
 
         history.invalidate_route("user", "room")
         self.assertEqual(history.pending("user", "room"), sent)
+
+    def test_boundary_migration_preserves_old_pending_and_tombstone_version(self):
+        kst = timezone(timedelta(hours=9))
+        review_id = int(datetime(2026, 9, 1, 3, 30, tzinfo=kst).timestamp() * 1000)
+        removed_id = int(datetime(2026, 9, 1, 3, 45, tzinfo=kst).timestamp() * 1000)
+        history = ReviewHistory({}, now_ms=lambda: 321)
+        history.observe(
+            "collection", "2026-09-01",
+            [row(review_id, 10), row(removed_id, 20)],
+        )
+        history.pending("user", "room")
+        history.observe(
+            "collection", "2026-09-01", [row(review_id, 10)],
+            allow_removals=True,
+        )
+
+        self.assertTrue(history.migrate_study_days("Asia/Seoul"))
+        self.assertFalse(history.migrate_study_days("Asia/Seoul"))
+        pending = history.pending("user", "room", since_day="2026-10-03")
+
+        self.assertEqual({batch["target_day"] for batch in pending}, {"2026-08-31"})
+        reviews = [item for batch in pending for item in batch["reviews"]]
+        removals = [item for batch in pending for item in batch["removed_ids"]]
+        self.assertEqual([item["id"] for item in reviews], [str(review_id)])
+        self.assertEqual(removals[0]["id"], str(removed_id))
+        self.assertEqual(removals[0]["changed_at"], 321)
+
+    def test_reclassifying_to_another_zone_and_back_does_not_duplicate(self):
+        kst = timezone(timedelta(hours=9))
+        review_id = int(datetime(2026, 10, 4, 12, 30, tzinfo=kst).timestamp() * 1000)
+        history = ReviewHistory({}, now_ms=lambda: 10)
+        history.observe("collection", "2026-10-04", [row(review_id, 10)])
+
+        history.migrate_study_days("UTC")
+        self.assertEqual(history.today("2026-10-03")["answers"], 1)
+        history.migrate_study_days("Asia/Seoul")
+
+        self.assertEqual(history.today("2026-10-04")["answers"], 1)
+        self.assertIsNone(history.today("2026-10-03"))
+        pending = history.pending("user", "room")
+        self.assertEqual(sum(len(batch["reviews"]) for batch in pending), 1)
+
+    def test_boundary_migration_does_not_expose_pre_join_cache_to_new_room(self):
+        kst = timezone(timedelta(hours=9))
+        old_id = int(datetime(2026, 9, 1, 3, 30, tzinfo=kst).timestamp() * 1000)
+        joined_id = int(datetime(2026, 10, 3, 3, 30, tzinfo=kst).timestamp() * 1000)
+        history = ReviewHistory({}, now_ms=lambda: 10)
+        history.observe("collection", "2026-09-01", [row(old_id, 10)])
+        history.observe("collection", "2026-10-03", [row(joined_id, 20)])
+
+        before = history.pending("user", "new-room", since_day="2026-10-03")
+        self.assertEqual(
+            [item["id"] for batch in before for item in batch["reviews"]],
+            [str(joined_id)],
+        )
+
+        history.migrate_study_days("Asia/Seoul")
+        after = history.pending("user", "new-room", since_day="2026-10-03")
+
+        self.assertEqual(
+            [item["id"] for batch in after for item in batch["reviews"]],
+            [str(joined_id)],
+        )
+        self.assertNotIn(
+            str(old_id),
+            [item["id"] for batch in after for item in batch["reviews"]],
+        )
 
 
 if __name__ == "__main__":

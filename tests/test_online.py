@@ -40,6 +40,14 @@ def headers_of(request):
 
 
 class SupabaseClientTests(unittest.TestCase):
+    def test_create_room_preserves_selected_timezone(self):
+        opener = FakeOpener([[{"group_id": "g1", "invite_code": "ABCD",
+                               "time_zone": "America/New_York", "day_start_hour": 4}]])
+        group = SupabaseClient(opener=opener).create_group("access", "Friends", "America/New_York")
+        self.assertEqual(body_of(opener.calls[0][0])["room_timezone"], "America/New_York")
+        self.assertEqual(group["time_zone"], "America/New_York")
+        self.assertEqual(group["day_start_hour"], 4)
+
     def test_review_upload_checks_receipt_and_omits_device_identity(self):
         batch = {"source_collection": "1700000000", "target_day": "2026-10-04",
                  "reviews": [{"id": "1791039601000", "card_id": "123", "time_ms": 1500, "changed_at": 0}],
@@ -180,7 +188,9 @@ class SupabaseClientTests(unittest.TestCase):
             self.assertEqual(headers_of(request)["authorization"], "Bearer access")
         self.assertEqual(body_of(requests[0]), {"id": "u1", "display_name": "윤"})
         self.assertIn("resolution=merge-duplicates", headers_of(requests[0])["prefer"])
-        self.assertEqual(body_of(requests[1]), {"group_name": "친구들"})
+        self.assertEqual(body_of(requests[1]), {"group_name": "친구들", "room_timezone": "Asia/Seoul"})
+        self.assertEqual(group["time_zone"], "Asia/Seoul")
+        self.assertEqual(group["day_start_hour"], 4)
         self.assertEqual(body_of(requests[2]), {"code": " abc "})
         self.assertEqual(body_of(requests[3]), {"target_group": "g1"})
         self.assertTrue(requests[3].full_url.endswith("/rest/v1/rpc/leave_study_group"))
