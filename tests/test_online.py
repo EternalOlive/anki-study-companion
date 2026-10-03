@@ -196,6 +196,36 @@ class SupabaseClientTests(unittest.TestCase):
         self.assertEqual(query["user_id"], ["eq.u1"])
         self.assertIn("study_groups", query["select"][0])
 
+    def test_owner_member_management_uses_fresh_roster_and_rpcs(self):
+        opener = FakeOpener([
+            [{"user_id": "u1", "joined_at": "a"}, {"user_id": "u2", "joined_at": "b"}],
+            [{"id": "u1", "display_name": "Owner"}, {"id": "u2", "display_name": "Friend"}],
+            [{"user_id": "u3"}],
+            None,
+            None,
+        ])
+        client = SupabaseClient(opener=opener)
+
+        members = client.list_group_members("access", "g1")
+        bans = client.list_group_bans("access", "g1")
+        client.moderate_group_member("access", "g1", "u2", blocked=True)
+        client.moderate_group_member("access", "g1", "u3", blocked=False)
+
+        self.assertEqual([row["display_name"] for row in members], ["Owner", "Friend"])
+        self.assertEqual(bans, [{"user_id": "u3"}])
+        requests = [call[0] for call in opener.calls]
+        roster_query = parse_qs(urlparse(requests[0].full_url).query)
+        self.assertEqual(roster_query["group_id"], ["eq.g1"])
+        self.assertEqual(roster_query["order"], ["joined_at.asc"])
+        self.assertTrue(requests[2].full_url.endswith("/rest/v1/rpc/list_study_group_bans"))
+        self.assertEqual(body_of(requests[2]), {"target_group": "g1"})
+        self.assertEqual(body_of(requests[3]), {
+            "target_group": "g1", "target_user": "u2", "blocked": True,
+        })
+        self.assertEqual(body_of(requests[4]), {
+            "target_group": "g1", "target_user": "u3", "blocked": False,
+        })
+
     def test_fetch_group_today_merges_profiles_with_separate_request(self):
         opener = FakeOpener([
             [{"user_id": "u1"}, {"user_id": "u2"}],

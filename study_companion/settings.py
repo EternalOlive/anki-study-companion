@@ -58,6 +58,7 @@ class SettingsDialog(QDialog):
     PAGE_LOGIN = 5
     PAGE_LEAVE = 6
     PAGE_RECOVER = 7
+    PAGE_MEMBERS = 8
 
     def __init__(self, controller, parent=None):
         super().__init__(parent or mw)
@@ -90,6 +91,7 @@ class SettingsDialog(QDialog):
         self.login_page = self._build_login_page()
         self.leave_page = self._build_leave_page()
         self.recover_page = self._build_recover_page()
+        self.members_page = self._build_members_page()
         for page in (
             self.home_page,
             self.create_page,
@@ -99,6 +101,7 @@ class SettingsDialog(QDialog):
             self.login_page,
             self.leave_page,
             self.recover_page,
+            self.members_page,
         ):
             self.pages.addWidget(page)
 
@@ -365,6 +368,33 @@ class SettingsDialog(QDialog):
         layout.addLayout(row)
         return page
 
+    def _build_members_page(self):
+        page, layout = self._detail_page(self._t("멤버 관리", "Manage members"))
+        self.members_notice = self._note(
+            self._t(
+                "내보낸 계정은 차단을 해제하기 전까지 이 방에 다시 참여할 수 없습니다.",
+                "Removed accounts cannot rejoin until you unblock them.",
+            )
+        )
+        layout.addWidget(self.members_notice)
+        self.members_list_layout = QVBoxLayout()
+        self.members_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.members_list_layout.setSpacing(8)
+        layout.addLayout(self.members_list_layout)
+        self.members_error = self._error_label()
+        layout.addWidget(self.members_error)
+        layout.addStretch(1)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        self.members_refresh = QPushButton(self._t("새로고침", "Refresh"), page)
+        self.members_back = QPushButton(self._t("뒤로", "Back"), page)
+        self.members_refresh.clicked.connect(self.load_members)
+        self.members_back.clicked.connect(self.show_home)
+        bottom.addWidget(self.members_refresh)
+        bottom.addWidget(self.members_back)
+        layout.addLayout(bottom)
+        return page
+
     def _build_account_page(self):
         page, layout = self._detail_page(self._t("계정 관리", "Account"))
         self.account_summary = self._note("")
@@ -598,6 +628,14 @@ class SettingsDialog(QDialog):
             self.room_layout.addLayout(row)
             user_id = (self.controller.online.get("auth") or {}).get("user_id")
             if user_id and group.get("owner_id") == user_id:
+                manage_row = QHBoxLayout()
+                manage_row.addStretch(1)
+                self.manage_members_button = QPushButton(
+                    self._t("멤버 관리", "Manage members"), self
+                )
+                self.manage_members_button.clicked.connect(self.show_members)
+                manage_row.addWidget(self.manage_members_button)
+                self.room_layout.addLayout(manage_row)
                 rotate_row = QHBoxLayout()
                 rotate_row.addStretch(1)
                 self.rotate_invite_button = QPushButton(
@@ -709,6 +747,177 @@ class SettingsDialog(QDialog):
         )
         self.pages.setCurrentIndex(self.PAGE_LEAVE)
         self.leave_submit.setFocus()
+
+    def _owner_context(self):
+        group = self.controller.online.get("group") or {}
+        user_id = (self.controller.online.get("auth") or {}).get("user_id")
+        if not group.get("id") or not user_id or group.get("owner_id") != user_id:
+            return None
+        return str(group["id"]), str(user_id)
+
+    def show_members(self):
+        if not self._owner_context():
+            self.show_home()
+            return
+        self.pages.setCurrentIndex(self.PAGE_MEMBERS)
+        self.load_members()
+
+    def _same_owner_context(self, group_id, owner_id):
+        return self._owner_context() == (group_id, owner_id)
+
+    def load_members(self):
+        context = self._owner_context()
+        if not context:
+            self.show_home()
+            return
+        if not self._begin_remote(self.members_error):
+            return
+        group_id, owner_id = context
+
+        def operation(token):
+            members = self.controller.client.list_group_members(token, group_id)
+            bans = self.controller.client.list_group_bans(token, group_id)
+            return members, bans
+
+        def success(value):
+            self._finish_remote()
+            if not self._valid() or not self._same_owner_context(group_id, owner_id):
+                return
+            members, bans = value
+            self._render_members(group_id, owner_id, members, bans)
+
+        controls = self.members_page.findChildren(QPushButton)
+        self.controller._run_authenticated_action(
+            controls,
+            operation,
+            success,
+            self._t("멤버를 불러오지 못했습니다.", "Could not load members."),
+            on_error=self._remote_error(
+                self.members_error,
+                self._t("멤버를 불러오지 못했습니다.", "Could not load members."),
+            ),
+        )
+
+    def _member_name(self, member):
+        return str(
+            member.get("display_name")
+            or canonical_nickname(str(member.get("user_id") or ""))
+        )
+
+    def _render_members(self, group_id, owner_id, members, bans):
+        _clear_layout(self.members_list_layout)
+        active = [row for row in members if str(row.get("user_id")) != owner_id]
+        blocked_ids = {str(row.get("user_id")) for row in bans}
+        known = {
+            str(row.get("user_id")): self._member_name(row)
+            for row in members
+            if row.get("user_id")
+        }
+        if active:
+            self.members_list_layout.addWidget(
+                self._heading(self._t("현재 멤버", "Current members"))
+            )
+            for member in active:
+                target_user = str(member.get("user_id"))
+                row = QHBoxLayout()
+                label = QLabel(self._member_name(member), self.members_page)
+                label.setTextFormat(Qt.TextFormat.PlainText)
+                remove = QPushButton(self._t("내보내기", "Remove"), self.members_page)
+                remove.clicked.connect(
+                    lambda _checked=False, user=target_user, name=self._member_name(member):
+                    self.block_member(group_id, owner_id, user, name)
+                )
+                row.addWidget(label)
+                row.addStretch(1)
+                row.addWidget(remove)
+                self.members_list_layout.addLayout(row)
+        else:
+            self.members_list_layout.addWidget(
+                self._note(self._t("다른 멤버가 없습니다.", "No other members."))
+            )
+        if blocked_ids:
+            self.members_list_layout.addWidget(
+                self._heading(self._t("차단된 계정", "Blocked accounts"))
+            )
+            for target_user in sorted(blocked_ids):
+                row = QHBoxLayout()
+                label = QLabel(
+                    known.get(target_user) or canonical_nickname(target_user),
+                    self.members_page,
+                )
+                label.setTextFormat(Qt.TextFormat.PlainText)
+                unblock = QPushButton(self._t("차단 해제", "Unblock"), self.members_page)
+                unblock.clicked.connect(
+                    lambda _checked=False, user=target_user:
+                    self.unblock_member(group_id, owner_id, user)
+                )
+                row.addWidget(label)
+                row.addStretch(1)
+                row.addWidget(unblock)
+                self.members_list_layout.addLayout(row)
+
+    def _confirm_member_removal(self, name):
+        answer = QMessageBox.question(
+            self,
+            self._t("멤버 내보내기", "Remove member"),
+            self._t(
+                f"{name} 계정을 방에서 내보내고 다시 참여하지 못하게 차단합니다. "
+                "이 방에 공유된 해당 계정의 기록은 삭제되지만, 그 사용자의 Anki 개인 기록은 그대로 남습니다.",
+                f"Remove and block {name} from this room. Their records shared with this room "
+                "will be removed, while their personal Anki records remain intact.",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def block_member(self, group_id, owner_id, target_user, name):
+        if not self._same_owner_context(group_id, owner_id):
+            self.show_home()
+            return
+        if not self._confirm_member_removal(name):
+            return
+        self._moderate_member(group_id, owner_id, target_user, True)
+
+    def unblock_member(self, group_id, owner_id, target_user):
+        if not self._same_owner_context(group_id, owner_id):
+            self.show_home()
+            return
+        self._moderate_member(group_id, owner_id, target_user, False)
+
+    def _moderate_member(self, group_id, owner_id, target_user, blocked):
+        if not self._begin_remote(self.members_error):
+            return
+
+        def operation(token):
+            self.controller.client.moderate_group_member(
+                token, group_id, target_user, blocked=blocked
+            )
+            return (
+                self.controller.client.list_group_members(token, group_id),
+                self.controller.client.list_group_bans(token, group_id),
+            )
+
+        def success(value):
+            self._finish_remote()
+            if not self._valid() or not self._same_owner_context(group_id, owner_id):
+                return
+            members, bans = value
+            self.controller.online.pop("members", None)
+            self.controller.sync_async(force=True)
+            self._render_members(group_id, owner_id, members, bans)
+
+        controls = self.members_page.findChildren(QPushButton)
+        self.controller._run_authenticated_action(
+            controls,
+            operation,
+            success,
+            self._t("멤버 설정을 바꾸지 못했습니다.", "Could not update the member."),
+            on_error=self._remote_error(
+                self.members_error,
+                self._t("멤버 설정을 바꾸지 못했습니다.", "Could not update the member."),
+            ),
+        )
 
     def show_account(self):
         self.refresh_from_controller()

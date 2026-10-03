@@ -99,6 +99,20 @@ class FakeClient:
         self.calls.append(("rotate_invite", token, group_id))
         return "N7KP"
 
+    def list_group_members(self, token, group_id):
+        self.calls.append(("list_group_members", token, group_id))
+        return [
+            {"user_id": "user-local", "display_name": "Owner"},
+            {"user_id": "user-friend", "display_name": "Study Friend"},
+        ]
+
+    def list_group_bans(self, token, group_id):
+        self.calls.append(("list_group_bans", token, group_id))
+        return [{"user_id": "user-blocked"}]
+
+    def moderate_group_member(self, token, group_id, user_id, *, blocked):
+        self.calls.append(("moderate_group_member", token, group_id, user_id, blocked))
+
     def update_user(self, token, **changes):
         self.calls.append(("update_user", token, changes))
         return {}
@@ -465,7 +479,60 @@ def check_owner_invite_rotation(app, QtWidgets, SettingsDialog):
         button.text() == "새 초대 코드 만들기" and button.isVisible()
         for button in member_dialog.home_page.findChildren(QtWidgets.QPushButton)
     )
+    assert not any(
+        button.text() == "멤버 관리" and button.isVisible()
+        for button in member_dialog.home_page.findChildren(QtWidgets.QPushButton)
+    )
     member_dialog.close()
+
+
+def check_owner_member_management(app, QtWidgets, SettingsDialog):
+    owner = FakeController()
+    owner.online["group"] = {
+        "id": "room-owner", "name": "Owner room", "invite_code": "C7K9",
+        "owner_id": "user-local",
+    }
+    dialog = _fresh_dialog(SettingsDialog, owner)
+    app.processEvents()
+    _button(dialog, QtWidgets, "멤버 관리").click()
+    assert owner.pending is not None
+    owner.finish_remote()
+    app.processEvents()
+    page_text = _visible_text(dialog, QtWidgets)
+    assert "Study Friend" in page_text
+    assert "차단된 계정" in page_text
+    assert "Owner" not in page_text
+
+    remove = _button(dialog, QtWidgets, "내보내기")
+    dialog._confirm_member_removal = lambda _name: True
+    remove.click()
+    owner.finish_remote()
+    app.processEvents()
+    assert ("moderate_group_member", "token", "room-owner", "user-friend", True) in owner.client.calls
+    assert owner.synced == [True]
+
+    unblock = _button(dialog, QtWidgets, "차단 해제")
+    unblock.click()
+    owner.finish_remote()
+    assert ("moderate_group_member", "token", "room-owner", "user-blocked", False) in owner.client.calls
+
+    owner.online["group"] = {
+        "id": "other-room", "name": "Other", "owner_id": "someone-else",
+    }
+    dialog.load_members()
+    assert dialog.pages.currentIndex() == dialog.PAGE_HOME
+    dialog.close()
+
+    stale = FakeController()
+    stale.online["group"] = {
+        "id": "room-owner", "name": "Owner room", "owner_id": "user-local",
+    }
+    stale_dialog = _fresh_dialog(SettingsDialog, stale)
+    stale_dialog.show_members()
+    stale.online["auth"]["user_id"] = "different-account"
+    stale.finish_remote()
+    assert not stale_dialog.members_list_layout.count()
+    stale_dialog.close()
 
 
 def check_account_states(app, SettingsDialog):
@@ -682,6 +749,7 @@ def main():
     check_home_draft_and_save(app, QtWidgets, SettingsDialog)
     check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
     check_owner_invite_rotation(app, QtWidgets, SettingsDialog)
+    check_owner_member_management(app, QtWidgets, SettingsDialog)
     check_account_states(app, SettingsDialog)
     check_username_account_creation(SettingsDialog, SupabaseError)
     check_username_login_and_recovery(SettingsDialog)

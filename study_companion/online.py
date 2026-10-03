@@ -411,6 +411,79 @@ class SupabaseClient:
             body={"target_group": group_id},
         )
 
+    def list_group_members(
+        self, token: str, group_id: str
+    ) -> list[dict[str, Any]]:
+        """Fetch the room roster directly from the server.
+
+        This deliberately does not use the study-stat cache: moderation must
+        act on the current membership, not on a previously rendered panel.
+        """
+        rows = self._request(
+            "GET",
+            "/rest/v1/group_members",
+            token=token,
+            query={
+                "select": "user_id,joined_at",
+                "group_id": f"eq.{group_id}",
+                "order": "joined_at.asc",
+            },
+        ) or []
+        user_ids = [str(row.get("user_id") or "") for row in rows]
+        user_ids = [user_id for user_id in user_ids if user_id]
+        profiles = []
+        if user_ids:
+            profiles = self._request(
+                "GET",
+                "/rest/v1/profiles",
+                token=token,
+                query={
+                    "select": "id,display_name",
+                    "id": f"in.({','.join(user_ids)})",
+                },
+            ) or []
+        names = {
+            str(row.get("id")): row.get("display_name")
+            for row in profiles
+            if row.get("id")
+        }
+        return [
+            {
+                "user_id": str(row.get("user_id")),
+                "joined_at": row.get("joined_at"),
+                "display_name": names.get(str(row.get("user_id"))),
+            }
+            for row in rows
+            if row.get("user_id")
+        ]
+
+    def list_group_bans(self, token: str, group_id: str) -> list[dict[str, Any]]:
+        result = self._request(
+            "POST",
+            "/rest/v1/rpc/list_study_group_bans",
+            token=token,
+            body={"target_group": group_id},
+        ) or []
+        if not isinstance(result, list):
+            raise SupabaseError(
+                "차단 목록 응답을 확인할 수 없습니다. / Invalid blocked-member response."
+            )
+        return [row for row in result if isinstance(row, dict) and row.get("user_id")]
+
+    def moderate_group_member(
+        self, token: str, group_id: str, user_id: str, *, blocked: bool
+    ) -> Any:
+        return self._request(
+            "POST",
+            "/rest/v1/rpc/moderate_study_group_member",
+            token=token,
+            body={
+                "target_group": group_id,
+                "target_user": user_id,
+                "blocked": bool(blocked),
+            },
+        )
+
     def list_groups(self, token: str, user_id: str) -> list[dict[str, Any]]:
         rows = self._request(
             "GET",

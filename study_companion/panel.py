@@ -102,7 +102,6 @@ class ActivityTimeline(QWidget):
         matches_today = study_day is None or str(study_day) == _now().date().isoformat()
         self.known = member.get("activity_known") is True and matches_today
         self.error = bool(member.get("activity_error")) and matches_today
-        self.setFixedHeight(max(120, self.fontMetrics().height() * 7))
         record_key = (member.get("user_id"), study_day)
         previous_buckets = self.buckets if record_key == self._record_key else {}
         if record_key != self._record_key:
@@ -125,7 +124,7 @@ class ActivityTimeline(QWidget):
         if self.error and previous_buckets:
             self.buckets = previous_buckets
             self.known = True
-        self.setFixedHeight(max(120, self.fontMetrics().height() * 7) if self.buckets
+        self.setFixedHeight(max(94, self.fontMetrics().height() * 5) if self.buckets
                             else self.fontMetrics().height() + 8)
         if self.error and not self.buckets:
             self.selected_slot = None
@@ -220,7 +219,7 @@ class ActivityTimeline(QWidget):
         font.setPointSizeF(max(8.0, font.pointSizeF() * 0.85))
         painter.setFont(font)
         metrics = painter.fontMetrics()
-        label_y = max(metrics.ascent() + 2, self.height() - metrics.height() * 2 - 12)
+        label_y = max(metrics.ascent() + 2, self.height() - metrics.height() - 14)
         baseline_y = max(15, label_y - metrics.height() - 4)
         bar_top = metrics.height() + 9
         bar_space = max(10, baseline_y - bar_top)
@@ -250,7 +249,7 @@ class ActivityTimeline(QWidget):
                 duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
                 answers = bucket["answer_count"]
                 detail = self.panel.tr(f"{duration} · {answers}회", f"{duration} · {answers} answers")
-                painter.drawLine(1, label_y + 10, self.width() - 1, label_y + 10)
+                painter.drawLine(1, label_y + 5, self.width() - 1, label_y + 5)
                 painter.setPen(foreground)
                 painter.drawText(1, self.height() - 5, period)
                 painter.drawText(self.width() - metrics.horizontalAdvance(detail) - 1, self.height() - 5, detail)
