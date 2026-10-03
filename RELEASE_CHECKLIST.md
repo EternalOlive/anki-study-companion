@@ -7,7 +7,7 @@
 - [x] 도크 접기·펼치기·반복 복원·메뉴 토글 스모크 통과
 - [x] 설정창 한국어·영어·밝은/어두운 테마·방 나가기 스모크 통과
 - [x] 방장 멤버 관리의 내보내기·차단 해제·방 전환 응답 무시 Qt 스모크 통과
-- [ ] 방장 내보내기·재입장 차단 migration의 운영 PostgreSQL rollback 검증 및 적용
+- [x] 방장 내보내기·재입장 차단 migration의 운영 PostgreSQL rollback 검증 및 적용. RLS·가입 차단 트리거·인증 사용자/익명 권한과 빈 차단 목록 확인
 - [x] `.ankiaddon` 12개 파일과 소스 SHA-256 일치
 - [x] 서버 보관 migration과 rollback 회귀 SQL의 실제 PostgreSQL 실행
 - [x] 서버 보관 migration 운영 적용과 첫 제한 배치 관찰 (`0일 / 0건`)
