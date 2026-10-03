@@ -1,8 +1,15 @@
 # Device sync activation
 
-## Review retention (prepared, not deployed)
+## Review retention (deployed 2026-10-04)
 
-Apply `migrations/20261004_review_retention.sql` after synced review totals.
+`migrations/20261004_review_retention.sql` was applied to production after its
+rollback regression completed successfully in the same database. Post-deploy
+checks confirmed the marker column, private archive table, service-role archive
+permission, authenticated-client denial, and zero eligible old rows. The first
+bounded call, `archive_review_days(90, 500)`, completed with 0 archived days and
+0 deleted events.
+
+For another environment, apply the migration after synced review totals.
 It keeps the current Asia/Seoul day and the preceding 89 calendar days as
 mutable raw review events. Older observed collection-days can be frozen into
 private `anki_review_day_archives` rows containing only answer count and total
@@ -29,7 +36,8 @@ against `archive_review_days` from two connections: one operation must wait or
 skip the locked marker, and the final state must be either mutable raw rows or
 one frozen archive, never both.
 
-No schedule is installed by the migration. If `pg_cron` is already enabled,
+No schedule is installed by the migration, and production scheduling remains
+disabled. If `pg_cron` is already enabled,
 schedule a small daily service-owned call only after deployment verification,
 for example `select public.archive_review_days(90, 500);`. Keep scheduling as a
 separate operational step so the first destructive cleanup is observable and

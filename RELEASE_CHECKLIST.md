@@ -7,8 +7,8 @@
 - [x] 도크 접기·펼치기·반복 복원·메뉴 토글 스모크 통과
 - [x] 설정창 한국어·영어·밝은/어두운 테마·방 나가기 스모크 통과
 - [x] `.ankiaddon` 12개 파일과 소스 SHA-256 일치
-- [ ] 서버 보관 migration과 rollback 회귀 SQL의 실제 PostgreSQL 실행
-- [ ] 서버 보관 migration 운영 적용과 첫 제한 배치 관찰
+- [x] 서버 보관 migration과 rollback 회귀 SQL의 실제 PostgreSQL 실행
+- [x] 서버 보관 migration 운영 적용과 첫 제한 배치 관찰 (`0일 / 0건`)
 - [ ] 자동 보관 예약: 운영 적용 후에도 별도 판단 전까지 비활성
 
 ## 자동 검증과 실제 기기 검증의 경계
