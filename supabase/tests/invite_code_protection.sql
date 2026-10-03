@@ -8,11 +8,21 @@ declare
   limited_user uuid := gen_random_uuid();
   outsider uuid := gen_random_uuid();
   room uuid := gen_random_uuid();
-  old_code text := 'A2BC';
+  old_code text;
+  invalid_code text;
   new_code text;
   result jsonb;
   attempt integer;
 begin
+  loop
+    old_code := public.generate_invite_code();
+    exit when not exists (select 1 from public.study_groups where invite_code = old_code);
+  end loop;
+  loop
+    invalid_code := public.generate_invite_code();
+    exit when invalid_code <> old_code
+      and not exists (select 1 from public.study_groups where invite_code = invalid_code);
+  end loop;
   insert into auth.users(id) values
     (owner_user), (joining_user), (limited_user), (outsider);
   insert into public.study_groups(id, name, invite_code, owner_id)
@@ -38,7 +48,7 @@ begin
 
   perform set_config('request.jwt.claim.sub', limited_user::text, true);
   for attempt in 1..8 loop
-    result := public.join_study_group_safe('ZZZZ');
+    result := public.join_study_group_safe(invalid_code);
     assert result->>'error' = 'INVALID_INVITE_CODE';
   end loop;
   result := public.join_study_group_safe(old_code);
