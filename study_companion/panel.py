@@ -491,14 +491,12 @@ class MemberRow(QWidget):
             label.setStyleSheet(f"color: {foreground}; background: transparent;")
         status = self.panel.controller._current_member_status(member)
         name = self.panel.member_name(member)
-        status_text = self.panel.status_text(status)
-        if status == "offline":
-            updated = self.panel.updated_time(member.get("updated_at"))
-            status_text = self.panel.tr(f"갱신 {updated}", f"Updated {updated}")
+        status_text = self.panel.status_text(status) if status in ("studying", "paused", "online") else ""
+        status_suffix = f"  ·  {status_text}" if status_text else ""
         self.identity_text.setText(
-            f"{_allow_anywhere_wrap(name)}  ·  {status_text}  {'-' if self.expanded else '+'}"
+            f"{_allow_anywhere_wrap(name)}{status_suffix}  {'-' if self.expanded else '+'}"
         )
-        self.identity.setToolTip(f"{name} · {status_text}")
+        self.identity.setToolTip(f"{name} · {status_text}" if status_text else name)
         self.panel.update_status_dot(self.dot, status)
 
         seconds = max(0, int(member.get("active_seconds") or 0))
@@ -543,7 +541,7 @@ class MemberRow(QWidget):
         self.identity.setCheckable(expandable)
         self.identity.setFocusPolicy(Qt.FocusPolicy.StrongFocus if expandable else Qt.FocusPolicy.NoFocus)
         self.identity.setCursor(Qt.CursorShape.PointingHandCursor if expandable else Qt.CursorShape.ArrowCursor)
-        self.identity.setAccessibleName(f"{name}, {status_text}" + (
+        self.identity.setAccessibleName((f"{name}, {status_text}" if status_text else name) + (
             self.panel.tr(". 오늘 활동 보기", ". Show today's activity") if expandable else ""
         ))
         if not expandable:
