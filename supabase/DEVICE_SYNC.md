@@ -41,7 +41,10 @@ disabled. If `pg_cron` is already enabled,
 schedule a small daily service-owned call only after deployment verification,
 for example `select public.archive_review_days(90, 500);`. Keep scheduling as a
 separate operational step so the first destructive cleanup is observable and
-reversible from a database backup.
+recoverable from a verified database backup. Backup availability and restore
+procedures have not yet been verified. No recurring cleanup occurs while the
+schedule is disabled. The initial 0/0 production call did not exercise deletion
+of real historical data; two-connection race verification also remains pending.
 
 ## Native Anki review totals (2026-10-04)
 

@@ -242,6 +242,28 @@ def main() -> int:
     assert online_row.dot.styleSheet() == ""
     assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
     assert panel.own_answers.accessibleName() == "60 / 100"
+    mine = next(m for m in controller.online["members"] if m["user_id"] == "self")
+    mine.update(activity_known=True, activity_buckets=[
+        {"slot": 30, "answer_count": 4, "time_ms": 72000},
+    ])
+    panel.refresh()
+    assert not panel.own_activity_timeline.isVisible()
+    panel.own_activity_toggle.click()
+    assert panel.own_activity_timeline.isVisible()
+    assert "07:30–07:45" in panel.own_activity_timeline.accessibleName()
+    mine["activity_error"] = True
+    panel.refresh()
+    assert "동기화 지연" in panel.own_activity_timeline.accessibleName()
+    mine.pop("activity_error")
+    mine["activity_buckets"] = []
+    panel.refresh()
+    assert "오늘 답변 기록 없음" in panel.own_activity_timeline.accessibleName()
+    mine["study_day"] = yesterday
+    panel.refresh()
+    assert "시간대 기록 없음" in panel.own_activity_timeline.accessibleName()
+    mine["study_day"] = today
+    panel.own_activity_toggle.click()
+    panel.refresh()
     assert "Anki 복습 기록" in panel.own_title.toolTip()
     assert "모바일" in panel.own_title.toolTip()
     assert panel.time_caption.text() == "공부 시간"

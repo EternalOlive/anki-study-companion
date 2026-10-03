@@ -573,6 +573,18 @@ class StudyPanel(QWidget):
         outer.addLayout(self.own_values)
         self._own_compact = False
 
+        self.own_activity_toggle = QPushButton(self)
+        self.own_activity_toggle.setFlat(True)
+        self.own_activity_toggle.setCheckable(True)
+        self.own_activity_toggle.setStyleSheet(
+            "QPushButton { text-align: left; padding: 4px 0; }"
+        )
+        outer.addWidget(self.own_activity_toggle)
+        self.own_activity_timeline = ActivityTimeline(self, self)
+        self.own_activity_timeline.hide()
+        self.own_activity_toggle.toggled.connect(self._toggle_own_activity)
+        outer.addWidget(self.own_activity_timeline)
+
         outer.addWidget(self._separator())
 
         columns = QHBoxLayout()
@@ -1061,6 +1073,21 @@ class StudyPanel(QWidget):
                 del self.member_rows[key]
                 self.member_order.remove(key)
 
+    def _toggle_own_activity(self, expanded: bool) -> None:
+        self.own_activity_timeline.setVisible(expanded)
+        self._update_own_activity_label()
+
+    def _update_own_activity_label(self) -> None:
+        expanded = self.own_activity_toggle.isChecked()
+        self.own_activity_toggle.setText(
+            self.tr("오늘 시간대 −", "Today's activity −") if expanded
+            else self.tr("오늘 시간대 +", "Today's activity +")
+        )
+        self.own_activity_toggle.setAccessibleName(
+            self.tr("오늘 시간대 접기", "Hide today's activity") if expanded
+            else self.tr("오늘 시간대 펼치기", "Show today's activity")
+        )
+
     def refresh(self) -> None:
         self.update_collapse_controls()
         current = _now()
@@ -1113,6 +1140,12 @@ class StudyPanel(QWidget):
         my_total = next((member for member in (raw_members or [])
                          if member.get("user_id") == my_id
                          and member.get("study_day") == current.date().isoformat()), None)
+        self._update_own_activity_label()
+        self.own_activity_toggle.setVisible(bool(group))
+        self.own_activity_timeline.setVisible(
+            bool(group) and self.own_activity_toggle.isChecked()
+        )
+        self.own_activity_timeline.update_activity(my_total or {})
         self.own_title.setToolTip(
             self.tr(
                 "Anki 복습 기록 기준 · 한국 시간 자정(UTC+9)\n모바일 기록은 모바일과 PC의 Anki 동기화 후 반영됩니다.\n시간은 Anki가 저장한 답변 시간이며 실행 중인 타이머가 아닙니다.",

@@ -4,6 +4,7 @@
 
 - Status: Implemented and installed — 축약된 방 중심 패널·한국어/영어 설정을 실제 Anki에 적용하고 양쪽 언어 캡처를 확인했다. 반복 수치·사람별 진행선은 제외한다.
 - Last refreshed: 2026-10-04
+- 내 오늘 누적 아래에 기본 접힘 상태의 `오늘 시간대 +`를 둔다. 방에 참여한 경우 내 계정의 오늘 시간대 응답을 친구와 같은 15분 단위 막대로 표시한다. 연속 착석 시간이 아닌 Anki 답변 기록이며 UTC+9 기준이다. 방이 없으면 이 컨트롤을 숨긴다.
 - Primary product surfaces: PC Anki 오른쪽 스터디방 패널, 그룹/목표 설정. 모바일 웹 조회는 후속 범위.
 - Evidence reviewed: 사용자 요구·첨부 화면, study_companion/addon.py, tracker.py, online.py, README.md, TODO.md, RLOG_UI_ANALYSIS.md.
 - 이 문서가 과거 적용 제안보다 우선한다. rlog 분석은 참고 자료다. 사용자별 색상·대표 친구·평균으로 과거 시점을 재현하는 이전 제안은 채택하지 않는다. 공부 중 상태의 작은 점에만 제한적으로 색을 사용한다.
