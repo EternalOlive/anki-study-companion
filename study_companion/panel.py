@@ -90,6 +90,8 @@ class ActivityTimeline(QWidget):
         self.known = False
         self.error = False
         self.buckets: dict[int, dict] = {}
+        self.selected_slot: int | None = None
+        self._record_key = None
         self.setMinimumHeight(45)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -100,7 +102,11 @@ class ActivityTimeline(QWidget):
         matches_today = study_day is None or str(study_day) == _now().date().isoformat()
         self.known = member.get("activity_known") is True and matches_today
         self.error = bool(member.get("activity_error")) and matches_today
-        self.setMinimumHeight(max(45, self.fontMetrics().height() * 3))
+        self.setFixedHeight(max(120, self.fontMetrics().height() * 7))
+        record_key = (member.get("user_id"), study_day)
+        if record_key != self._record_key:
+            self.selected_slot = None
+        self._record_key = record_key
         self.buckets = {}
         if self.known:
             for bucket in member.get("activity_buckets") or []:
@@ -115,6 +121,13 @@ class ActivityTimeline(QWidget):
                         "answer_count": answers,
                         "time_ms": time_ms,
                     }
+        if self.error:
+            self.selected_slot = None
+        elif self.selected_slot not in self.buckets:
+            self.selected_slot = max(self.buckets, default=None)
+        self.setAccessibleDescription(
+            self._description(self.selected_slot) if self.selected_slot is not None else ""
+        )
         descriptions = [self._description(slot) for slot in sorted(self.buckets)]
         if self.error:
             summary = self.panel.tr("시간대 동기화 지연", "Activity sync delayed")
@@ -160,26 +173,76 @@ class ActivityTimeline(QWidget):
         self.setToolTip(self.accessibleName())
         super().leaveEvent(event)
 
+    def _select_slot(self, slot: int) -> None:
+        if self.error or slot not in self.buckets:
+            return
+        self.selected_slot = slot
+        self.setAccessibleDescription(self._description(slot))
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.buckets and not self.error:
+            slot = self._slot_at(int(event.position().x()))
+            if slot is not None:
+                closest = min(self.buckets, key=lambda candidate: abs(candidate - slot))
+                if abs(closest - slot) <= 2:
+                    self._select_slot(closest)
+                    self.setFocus()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and self.buckets and not self.error:
+            slots = sorted(self.buckets)
+            index = slots.index(self.selected_slot) if self.selected_slot in slots else 0
+            step = 1 if event.key() == Qt.Key.Key_Right else -1
+            self._select_slot(slots[max(0, min(len(slots) - 1, index + step))])
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         foreground = self.palette().color(QPalette.ColorRole.WindowText)
         muted = self.palette().color(QPalette.ColorRole.WindowText)
         muted.setAlpha(170)
         font = painter.font()
-        font.setPointSizeF(max(7.0, font.pointSizeF() * 0.72))
+        font.setPointSizeF(max(8.0, font.pointSizeF() * 0.85))
         painter.setFont(font)
         metrics = painter.fontMetrics()
-        label_y = max(metrics.ascent() + 2, self.height() - 4)
+        label_y = max(metrics.ascent() + 2, self.height() - metrics.height() * 2 - 12)
         baseline_y = max(15, label_y - metrics.height() - 4)
-        bar_top = max(3, baseline_y - 12)
+        bar_top = metrics.height() + 9
+        bar_space = max(10, baseline_y - bar_top)
         if self.known and not self.error and self.buckets:
             painter.setPen(QPen(muted, 1))
+            painter.drawText(1, metrics.ascent() + 1, self.panel.tr("답변 시간 / 15분 구간", "Answer time / 15-min bin"))
+            scale = "15:00"
+            painter.drawText(self.width() - metrics.horizontalAdvance(scale) - 1, metrics.ascent() + 1, scale)
             painter.drawLine(1, baseline_y, max(1, self.width() - 2), baseline_y)
             width = max(1, self.width() - 2)
             for slot in self.buckets:
                 x1 = 1 + round(slot * width / 96)
                 x2 = 1 + round((slot + 1) * width / 96)
-                painter.fillRect(x1, bar_top, max(1, x2 - x1), baseline_y - bar_top, foreground)
+                height = max(2, round(bar_space * min(1, self.buckets[slot]["time_ms"] / 900000)))
+                selected = slot == self.selected_slot
+                if selected:
+                    shade = self.palette().color(QPalette.ColorRole.WindowText)
+                    shade.setAlpha(25)
+                    painter.fillRect(x1 - 2, bar_top, max(5, x2 - x1 + 3), bar_space, shade)
+                painter.fillRect(x1, baseline_y - height, max(1, x2 - x1 - 1), height, foreground if selected else muted)
+
+            if self.selected_slot in self.buckets:
+                slot = self.selected_slot
+                bucket = self.buckets[slot]
+                start, end = slot * 15, (slot + 1) * 15
+                period = f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
+                duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
+                answers = bucket["answer_count"]
+                detail = self.panel.tr(f"{duration} · {answers}회", f"{duration} · {answers} answers")
+                painter.drawLine(1, label_y + 10, self.width() - 1, label_y + 10)
+                painter.setPen(foreground)
+                painter.drawText(1, self.height() - 5, period)
+                painter.drawText(self.width() - metrics.horizontalAdvance(detail) - 1, self.height() - 5, detail)
 
         if self.error or not self.known or not self.buckets:
             empty = self.panel.tr(
@@ -577,7 +640,7 @@ class StudyPanel(QWidget):
         self.own_activity_toggle.setFlat(True)
         self.own_activity_toggle.setCheckable(True)
         self.own_activity_toggle.setStyleSheet(
-            "QPushButton { text-align: left; padding: 4px 0; }"
+            "QPushButton { text-align: left; padding: 4px 0; border: none; background: transparent; }"
         )
         outer.addWidget(self.own_activity_toggle)
         self.own_activity_timeline = ActivityTimeline(self, self)
@@ -1080,7 +1143,7 @@ class StudyPanel(QWidget):
     def _update_own_activity_label(self) -> None:
         expanded = self.own_activity_toggle.isChecked()
         self.own_activity_toggle.setText(
-            self.tr("오늘 시간대 −", "Today's activity −") if expanded
+            self.tr("오늘 시간대 -", "Today's activity -") if expanded
             else self.tr("오늘 시간대 +", "Today's activity +")
         )
         self.own_activity_toggle.setAccessibleName(

@@ -224,6 +224,18 @@ def main() -> int:
     assert first_row.activity_timeline.isVisible()
     assert "07:30–07:45" in first_row.activity_timeline.accessibleName()
     assert "4회" in first_row.activity_timeline.accessibleName()
+    from PyQt6.QtCore import Qt, QPoint
+    from PyQt6.QtTest import QTest
+    timeline = first_row.activity_timeline
+    assert timeline.selected_slot == 62
+    QTest.keyClick(timeline, Qt.Key.Key_Left)
+    assert timeline.selected_slot == 31
+    timeline.update_activity(first_row.member)
+    assert timeline.selected_slot == 31
+    QTest.mouseClick(timeline, Qt.MouseButton.LeftButton,
+                     pos=QPoint(1 + round(30.5 * (timeline.width() - 2) / 96), 35))
+    assert timeline.selected_slot == 30
+    assert "07:30–07:45" in timeline.accessibleDescription()
     current_friend = first_row.member
     first_row.update_member(dict(current_friend, study_day=yesterday))
     assert "시간대 기록 없음" in first_row.activity_timeline.accessibleName()
