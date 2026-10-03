@@ -104,6 +104,7 @@ class ActivityTimeline(QWidget):
         self.error = bool(member.get("activity_error")) and matches_today
         self.setFixedHeight(max(120, self.fontMetrics().height() * 7))
         record_key = (member.get("user_id"), study_day)
+        previous_buckets = self.buckets if record_key == self._record_key else {}
         if record_key != self._record_key:
             self.selected_slot = None
         self._record_key = record_key
@@ -121,7 +122,12 @@ class ActivityTimeline(QWidget):
                         "answer_count": answers,
                         "time_ms": time_ms,
                     }
-        if self.error:
+        if self.error and previous_buckets:
+            self.buckets = previous_buckets
+            self.known = True
+        self.setFixedHeight(max(120, self.fontMetrics().height() * 7) if self.buckets
+                            else self.fontMetrics().height() + 8)
+        if self.error and not self.buckets:
             self.selected_slot = None
         elif self.selected_slot not in self.buckets:
             self.selected_slot = max(self.buckets, default=None)
@@ -203,6 +209,11 @@ class ActivityTimeline(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         foreground = self.palette().color(QPalette.ColorRole.WindowText)
+        if not self.buckets:
+            painter.setPen(foreground)
+            text = self.panel.tr("오늘 기록 없음", "No activity today") if self.known and not self.error else "—"
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+            return
         muted = self.palette().color(QPalette.ColorRole.WindowText)
         muted.setAlpha(170)
         font = painter.font()
@@ -213,7 +224,7 @@ class ActivityTimeline(QWidget):
         baseline_y = max(15, label_y - metrics.height() - 4)
         bar_top = metrics.height() + 9
         bar_space = max(10, baseline_y - bar_top)
-        if self.known and not self.error and self.buckets:
+        if self.known and self.buckets:
             painter.setPen(QPen(muted, 1))
             painter.drawText(1, metrics.ascent() + 1, self.panel.tr("답변 시간 / 15분 구간", "Answer time / 15-min bin"))
             scale = "15:00"
@@ -244,7 +255,7 @@ class ActivityTimeline(QWidget):
                 painter.drawText(1, self.height() - 5, period)
                 painter.drawText(self.width() - metrics.horizontalAdvance(detail) - 1, self.height() - 5, detail)
 
-        if self.error or not self.known or not self.buckets:
+        if not self.known or not self.buckets:
             empty = self.panel.tr(
                 "시간대 동기화 지연" if self.error else "오늘 답변 기록 없음" if self.known else "시간대 기록 없음",
                 "Activity sync delayed" if self.error else "No answers recorded today" if self.known else "Timeline unavailable",
@@ -435,6 +446,10 @@ class MemberRow(QWidget):
         detail_layout.addWidget(self.details)
         self.activity_timeline = ActivityTimeline(panel, self.detail_body)
         detail_layout.addWidget(self.activity_timeline)
+        self.activity_retry = QPushButton(self.detail_body)
+        self.activity_retry.setFlat(True)
+        self.activity_retry.clicked.connect(lambda: self.panel.controller.sync_async(force=True))
+        detail_layout.addWidget(self.activity_retry)
         self.detail_body.hide()
         layout.addWidget(self.detail_body)
 
@@ -479,6 +494,8 @@ class MemberRow(QWidget):
             self.summary.addWidget(self.answers, 0, 3)
 
     def toggle_expanded(self) -> None:
+        if not self.identity.property("expandable"):
+            return
         self.expanded = not self.expanded
         self.identity.setChecked(self.expanded)
         self.detail_body.setVisible(self.expanded)
@@ -535,7 +552,11 @@ class MemberRow(QWidget):
         self.details.setText("\n".join(lines))
         self.details.setVisible(bool(lines))
         self.activity_timeline.update_activity(member)
-        expandable = True
+        timeline = self.activity_timeline
+        self.activity_retry.setText(self.panel.tr("재시도", "Retry"))
+        self.activity_retry.setVisible(timeline.error)
+        timeline.setVisible(bool(timeline.buckets) or not timeline.error)
+        expandable = bool(lines or timeline.known or timeline.buckets or timeline.error)
         changed = self.identity.property("expandable") != expandable
         self.identity.setProperty("expandable", expandable)
         self.identity.setCheckable(expandable)
@@ -546,6 +567,8 @@ class MemberRow(QWidget):
         ))
         if not expandable:
             self.expanded = False
+        sign = f"  {'-' if self.expanded else '+'}" if expandable else ""
+        self.identity_text.setText(f"{_allow_anywhere_wrap(name)}{status_suffix}{sign}")
         self.identity.setChecked(self.expanded)
         self.detail_body.setVisible(self.expanded)
         if changed:

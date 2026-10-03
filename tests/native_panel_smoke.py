@@ -236,6 +236,11 @@ def main() -> int:
                      pos=QPoint(1 + round(30.5 * (timeline.width() - 2) / 96), 35))
     assert timeline.selected_slot == 30
     assert "07:30–07:45" in timeline.accessibleDescription()
+    saved_buckets = dict(timeline.buckets)
+    timeline.update_activity(dict(first_row.member, activity_error=True,
+                                  activity_known=False, activity_buckets=[]))
+    assert timeline.buckets == saved_buckets
+    timeline.update_activity(first_row.member)
     current_friend = first_row.member
     first_row.update_member(dict(current_friend, study_day=yesterday))
     assert "시간대 기록 없음" in first_row.activity_timeline.accessibleName()
@@ -297,7 +302,9 @@ def main() -> int:
                         card_goal=0, current_deck_name=None)
     online_row.update_member(empty_friend)
     online_row.identity.click()
-    assert online_row.expanded and not online_row.details.text()
+    assert not online_row.expanded and not online_row.details.text()
+    assert not online_row.identity.isCheckable()
+    assert "+" not in online_row.identity_text.text()
     assert "시간대 기록 없음" in online_row.activity_timeline.accessibleName()
     assert "갱신" not in online_row.identity_text.text()
     assert " · " not in online_row.identity_text.text()
@@ -305,8 +312,13 @@ def main() -> int:
     assert "목표 없음" not in online_row.details.text()
     online_row.update_member(dict(empty_friend, activity_known=True, activity_buckets=[]))
     assert "오늘 답변 기록 없음" in online_row.activity_timeline.accessibleName()
+    assert online_row.activity_timeline.height() < 50
+    online_row.identity.click()
+    assert online_row.expanded
     online_row.update_member(dict(empty_friend, activity_error="timeout"))
     assert "시간대 동기화 지연" in online_row.activity_timeline.accessibleName()
+    assert online_row.activity_retry.isVisible()
+    assert not online_row.activity_timeline.isVisible()
     online_row.update_member(dict(empty_friend, active_seconds=None, answer_count=None))
     assert online_row.time.text() == "—" and online_row.answers.text() == "—"
     online_row.update_member(controller.online["members"][1])
