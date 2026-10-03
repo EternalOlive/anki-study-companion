@@ -40,6 +40,23 @@ def headers_of(request):
 
 
 class SupabaseClientTests(unittest.TestCase):
+    def test_safe_invite_errors_and_rotation(self):
+        for result, status in (({"ok": False, "error": "TOO_MANY_ATTEMPTS"}, 429),
+                               ({"ok": False, "error": "INVALID_INVITE_CODE"}, 400)):
+            with self.assertRaises(SupabaseError) as caught:
+                SupabaseClient(opener=FakeOpener([result])).join_group("access", "AAAA")
+            self.assertEqual(caught.exception.status, status)
+        client = SupabaseClient(opener=FakeOpener(["ABCD"]))
+        self.assertEqual(client.rotate_invite("access", "g1"), "ABCD")
+
+    def test_join_fails_closed_during_server_migration(self):
+        error = HTTPError("https://example/rpc/join_study_group_safe", 404, "missing", {}, io.BytesIO(b'{}'))
+        opener = FakeOpener([error])
+        with self.assertRaises(SupabaseError) as caught:
+            SupabaseClient(opener=opener).join_group("access", "ABCD")
+        self.assertEqual(caught.exception.status, 503)
+        self.assertEqual(len(opener.calls), 1)
+
     def test_current_deck_is_bounded_and_can_be_cleared(self):
         opener = FakeOpener([None, None])
         client = SupabaseClient(opener=opener)
@@ -117,7 +134,7 @@ class SupabaseClientTests(unittest.TestCase):
         opener = FakeOpener([
             [{"id": "u1", "display_name": "윤"}],
             [{"group_id": "g1", "invite_code": "ABC"}],
-            "g1",
+            {"ok": True, "group_id": "g1"},
             None,
             [{"group_id": "g1", "user_id": "u1"}],
         ])

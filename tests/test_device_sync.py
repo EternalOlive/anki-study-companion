@@ -1,4 +1,5 @@
 import json
+import copy
 import tempfile
 import unittest
 from pathlib import Path
@@ -140,6 +141,110 @@ class DeviceSyncLedgerTests(unittest.TestCase):
         self.assertEqual(next_day["active_seconds"], 12)
         self.assertEqual(next_day["answer_count"], 1)
 
+    def test_restored_stream_rebases_on_server_without_double_counting_two_devices(self):
+        device_a = DeviceSyncLedger({})
+        first = device_a.prepare(
+            user_id="u1|room", day="2026-10-04", active_seconds=120,
+            answer_count=8, time_goal_minutes=0, card_goal=0,
+            status="paused",
+        )
+        device_a.acknowledge("u1|room", "2026-10-04", first["revision"])
+        old_backup = copy.deepcopy(device_a.state)
+
+        current = device_a.prepare(
+            user_id="u1|room", day="2026-10-04", active_seconds=180,
+            answer_count=12, time_goal_minutes=0, card_goal=0,
+            status="paused",
+        )
+        device_a.acknowledge("u1|room", "2026-10-04", current["revision"])
+        server_a = {
+            "revision": current["revision"],
+            "active_seconds": current["active_seconds"],
+            "answer_count": current["answer_count"],
+        }
+        server_b = {"active_seconds": 60, "answer_count": 4}
+
+        restored = DeviceSyncLedger(old_backup)
+        stale = restored.prepare(
+            user_id="u1|room", day="2026-10-04", active_seconds=140,
+            answer_count=10, time_goal_minutes=0, card_goal=0,
+            status="paused",
+        )
+        self.assertEqual(stale["revision"], server_a["revision"])
+        self.assertNotEqual(stale["active_seconds"], server_a["active_seconds"])
+
+        notice = restored.rebase_from_server(
+            user_id="u1|room", day="2026-10-04",
+            active_seconds=140, answer_count=10, stored=server_a,
+        )
+        resumed = restored.prepare(
+            user_id="u1|room", day="2026-10-04", active_seconds=150,
+            answer_count=11, time_goal_minutes=0, card_goal=0,
+            status="studying",
+        )
+
+        self.assertEqual(notice["baselined_local_seconds"], 140)
+        self.assertEqual(resumed["revision"], server_a["revision"] + 1)
+        self.assertEqual(resumed["active_seconds"], 190)
+        self.assertEqual(resumed["answer_count"], 13)
+        self.assertEqual(
+            resumed["active_seconds"] + server_b["active_seconds"], 250
+        )
+        self.assertEqual(resumed["answer_count"] + server_b["answer_count"], 17)
+
+    def test_reinstall_with_empty_ledger_continues_after_server_baseline(self):
+        reinstalled = DeviceSyncLedger({})
+        notice = reinstalled.rebase_from_server(
+            user_id="u1|room", day="2026-10-04",
+            active_seconds=25, answer_count=2,
+            stored={"revision": 7, "active_seconds": 300, "answer_count": 20},
+        )
+        resumed = reinstalled.prepare(
+            user_id="u1|room", day="2026-10-04", active_seconds=35,
+            answer_count=3, time_goal_minutes=60, card_goal=100,
+            status="studying",
+        )
+
+        self.assertEqual(notice["server_revision"], 7)
+        self.assertEqual(resumed["revision"], 8)
+        self.assertEqual(resumed["active_seconds"], 310)
+        self.assertEqual(resumed["answer_count"], 21)
+
+    def test_rebase_rejects_older_server_evidence_without_mutating_ledger(self):
+        state = {}
+        ledger = DeviceSyncLedger(state)
+        current = ledger.prepare(
+            user_id="u1|room", day="2026-10-04", active_seconds=100,
+            answer_count=6, time_goal_minutes=0, card_goal=0,
+            status="paused",
+        )
+        before = copy.deepcopy(state)
+
+        with self.assertRaises(ValueError):
+            ledger.rebase_from_server(
+                user_id="u1|room", day="2026-10-04",
+                active_seconds=100, answer_count=6,
+                stored={
+                    "revision": current["revision"] - 1,
+                    "active_seconds": 100,
+                    "answer_count": 6,
+                },
+            )
+        self.assertEqual(state, before)
+
+    def test_rebase_rejects_incomplete_evidence_without_creating_account_state(self):
+        state = {}
+        ledger = DeviceSyncLedger(state)
+        before = copy.deepcopy(state)
+
+        with self.assertRaises(ValueError):
+            ledger.rebase_from_server(
+                user_id="u1|room", day="2026-10-04",
+                active_seconds=0, answer_count=0,
+                stored={"revision": 3, "active_seconds": 100},
+            )
+        self.assertEqual(state, before)
+
 
 class DeviceSyncRequestTests(unittest.TestCase):
     def test_server_ahead_response_is_not_a_successful_save(self):
@@ -151,7 +256,10 @@ class DeviceSyncRequestTests(unittest.TestCase):
             )
 
     def test_device_request_includes_goals(self):
-        opener = FakeOpener([{"revision": 3}])
+        opener = FakeOpener([{
+            "group_id": "g1", "device_id": "d1", "study_day": "2026-10-03",
+            "revision": 3, "active_seconds": 100, "answer_count": 9,
+        }])
         client = SupabaseClient(opener=opener)
         client.record_device_day(
             "token", group_id="g1", device_id="d1", study_day="2026-10-03",

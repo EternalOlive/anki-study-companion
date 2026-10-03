@@ -438,7 +438,7 @@ class StudyPanel(QWidget):
         self.error_text = QLabel(self.error_box)
         self.error_text.setWordWrap(True)
         self.retry = QPushButton(self.error_box)
-        self.retry.clicked.connect(lambda: self.controller.sync_async(force=True))
+        self.retry.clicked.connect(self._handle_error_action)
         error_layout.addWidget(self.error_text, 1)
         error_layout.addWidget(self.retry)
         self.error_box.hide()
@@ -587,6 +587,14 @@ class StudyPanel(QWidget):
         self._update_history_toggle()
         if checked:
             self._refresh_history(_now())
+
+    def _handle_error_action(self) -> None:
+        if self.controller.online.get("recovery_notice") and not self.controller.online.get("last_error"):
+            self.controller.online.pop("recovery_notice", None)
+            self.controller.save()
+            self.refresh()
+            return
+        self.controller.sync_async(force=True)
 
     def _set_history_mode(self, mode: str) -> None:
         self.history_mode = mode
@@ -758,15 +766,18 @@ class StudyPanel(QWidget):
         self.manage.setText(self.tr("관리", "Manage"))
         self.manage.setAccessibleName(self.tr("스터디방 관리", "Manage study room"))
 
-        self.own_title.setText(self.tr("이 PC · 오늘", "This PC · today"))
+        self.own_title.setText(
+            self.tr("나 · 전체 PC", "You · all PCs") if group
+            else self.tr("이 PC · 오늘", "This PC · today")
+        )
         my_total = next((member for member in (raw_members or [])
                          if member.get("user_id") == my_id
                          and member.get("study_day") == current.date().isoformat()), None)
         self.own_title.setToolTip(
             self.tr(
-                f"모든 PC 합계: {self.format_duration(int(my_total.get('active_seconds') or 0))} · {int(my_total.get('answer_count') or 0)}회",
-                f"All PCs: {self.format_duration(int(my_total.get('active_seconds') or 0))} · {int(my_total.get('answer_count') or 0)} answers",
-            ) if my_total else ""
+                f"마지막 동기화 기준 · 한국 시간 자정(UTC+9)\n이 PC: {self.format_duration(int(record.get('seconds') or 0))} · {int(record.get('answers') or 0)}회",
+                f"Last synced · day resets at midnight UTC+9\nThis PC: {self.format_duration(int(record.get('seconds') or 0))} · {int(record.get('answers') or 0)} answers",
+            )
         )
         own_status = self.status_text(
             "online" if tracker.status == "stopped" else tracker.status
@@ -776,10 +787,11 @@ class StudyPanel(QWidget):
             self.own_dot, "online" if tracker.status == "stopped" else tracker.status
         )
 
-        seconds = max(0, int(record.get("seconds") or 0))
+        own_record = my_total if group else record
+        seconds = max(0, int((own_record or {}).get("active_seconds" if group else "seconds") or 0))
         time_value = self.format_clock(seconds)
         time_goal = max(0, int(tracker.time_goal_minutes or 0))
-        answer_value = max(0, int(record.get("answers") or 0))
+        answer_value = max(0, int((own_record or {}).get("answer_count" if group else "answers") or 0))
         answer_goal = max(0, int(tracker.card_goal or 0))
         self.own_time.setText(
             f"{time_value} / {self.tr(f'{time_goal}분', f'{time_goal}m')}"
@@ -789,7 +801,14 @@ class StudyPanel(QWidget):
         self.own_answers.setText(
             f"{answer_value} / {answer_goal}" if answer_goal else str(answer_value)
         )
-        self.time_caption.setText(self.tr("시간 / 목표", "Time / goal"))
+        if group and not my_total:
+            self.own_time.setText("—")
+            self.own_answers.setText("—")
+        self.time_caption.setText(
+            self.tr("시간 / 목표 · 동기화 기준", "Time / goal · synced") if group and my_total
+            else self.tr("동기화 대기", "Awaiting sync") if group
+            else self.tr("시간 / 목표", "Time / goal")
+        )
         self.answer_caption.setText(self.tr("답변 / 목표", "Answers / goal"))
 
         self.people_caption.setText(self.tr("친구", "Friends"))
@@ -817,10 +836,17 @@ class StudyPanel(QWidget):
         if self.history_toggle.isChecked():
             self._refresh_history(current)
 
-        error = self.controller.online.get("last_error")
+        error = self.controller.online.get("last_error") or self.controller.online.get("recovery_notice")
         self.error_box.setVisible(bool(error))
         if error:
-            self.error_text.setText(self.tr("동기화 지연", "Sync delayed"))
+            self.error_text.setText(
+                self.tr("동기화 지연", "Sync delayed") if self.controller.online.get("last_error")
+                else str(error)
+            )
             self.error_text.setToolTip(str(error))
-            self.retry.setText(self.tr("재시도", "Retry"))
+            self.retry.setText(
+                self.tr("재시도", "Retry") if self.controller.online.get("last_error")
+                else self.tr("확인", "Dismiss")
+            )
+            self.retry.setVisible(True)
         self._apply_responsive_layout()

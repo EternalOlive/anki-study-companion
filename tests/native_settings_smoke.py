@@ -70,7 +70,12 @@ class FakeClient:
 
     def create_group(self, token, name):
         self.calls.append(("create_group", token, name))
-        return {"id": "room-created", "name": name, "invite_code": "C7K9"}
+        return {
+            "id": "room-created",
+            "name": name,
+            "invite_code": "C7K9",
+            "owner_id": "user-local",
+        }
 
     def join_group(self, token, code):
         self.calls.append(("join_group", token, code))
@@ -86,8 +91,13 @@ class FakeClient:
                 "id": "room-joined",
                 "name": "Quiet room",
                 "invite_code": "TMQV",
+                "owner_id": "user-owner",
             }
         ]
+
+    def rotate_invite(self, token, group_id):
+        self.calls.append(("rotate_invite", token, group_id))
+        return "N7KP"
 
     def update_user(self, token, **changes):
         self.calls.append(("update_user", token, changes))
@@ -294,21 +304,26 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     assert dialog.time_goal.value() == 300
     assert dialog.answer_goal.value() == 800
     assert dialog.language.currentData() == "en"
+    assert not dialog.share_deck_name.isChecked()
     assert not dialog.save_button.isEnabled()
 
     dialog.time_goal.setValue(320)
     dialog.answer_goal.setValue(850)
     dialog.language.setCurrentIndex(dialog.language.findData("ko"))
+    dialog.share_deck_name.setChecked(True)
     dialog.show_account()
     dialog.show_home()
     assert dialog.time_goal.value() == 320
     assert dialog.answer_goal.value() == 850
     assert dialog.language.currentData() == "ko"
+    assert dialog.share_deck_name.isChecked()
     assert controller.locale == "en"
 
     home_text = _visible_text(dialog, QtWidgets)
     assert "오늘" not in home_text and "Today" not in home_text
     assert "멤버" not in home_text and "Members" not in home_text
+    assert "UTC+9" in home_text
+    assert "Card contents are not shared" in home_text
     assert not re.search(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
         home_text,
@@ -319,6 +334,7 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     assert controller.tracker.time_goal_minutes == 320
     assert controller.tracker.card_goal == 850
     assert controller.locale == "ko"
+    assert controller.online["share_deck_name"] is True
     assert controller.saved == 1 and controller.refreshed == 1
     assert controller.synced == [True]
     dialog.close()
@@ -327,9 +343,11 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     cancel_dialog = _fresh_dialog(SettingsDialog, cancel_controller)
     cancel_dialog.time_goal.setValue(15)
     cancel_dialog.language.setCurrentIndex(cancel_dialog.language.findData("en"))
+    cancel_dialog.share_deck_name.setChecked(True)
     cancel_dialog.reject()
     assert cancel_controller.tracker.time_goal_minutes == 60
     assert cancel_controller.locale == "ko"
+    assert "share_deck_name" not in cancel_controller.online
     assert cancel_controller.saved == 0
 
 
@@ -343,6 +361,8 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert dialog.pages.currentIndex() == dialog.PAGE_CREATE
     assert dialog.group_name.isVisible()
     assert not dialog.invite_code.isVisible()
+    assert "UTC+9" in _visible_text(dialog, QtWidgets)
+    assert "카드 내용은 공유하지 않습니다" in _visible_text(dialog, QtWidgets)
     dialog.show_home()
 
     _button(dialog, QtWidgets, "초대 코드로 참여").click()
@@ -350,6 +370,8 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert dialog.pages.currentIndex() == dialog.PAGE_JOIN
     assert dialog.invite_code.isVisible()
     assert not dialog.group_name.isVisible()
+    assert "UTC+9" in _visible_text(dialog, QtWidgets)
+    assert "카드 내용은 공유하지 않습니다" in _visible_text(dialog, QtWidgets)
 
     dialog.invite_code.setText("O1l0")
     dialog.join_group()
@@ -400,6 +422,50 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert controller.discarded_outboxes == [("user-local", "room-joined")]
     assert _button(dialog, QtWidgets, "초대 코드로 참여").isVisible()
     dialog.close()
+
+
+def check_owner_invite_rotation(app, QtWidgets, SettingsDialog):
+    owner = FakeController()
+    owner.online["group"] = {
+        "id": "room-owner",
+        "name": "Owner room",
+        "invite_code": "C7K9",
+        "owner_id": "user-local",
+    }
+    dialog = _fresh_dialog(SettingsDialog, owner)
+    app.processEvents()
+
+    rotate = _button(dialog, QtWidgets, "새 초대 코드 만들기")
+    dialog._confirm_invite_rotation = lambda: False
+    rotate.click()
+    assert owner.pending is None
+    assert owner.online["group"]["invite_code"] == "C7K9"
+
+    dialog._confirm_invite_rotation = lambda: True
+    rotate.click()
+    assert owner.pending is not None
+    assert not rotate.isEnabled()
+    owner.finish_remote()
+    app.processEvents()
+    assert owner.client.calls[-1] == ("rotate_invite", "token", "room-owner")
+    assert owner.online["group"]["invite_code"] == "N7KP"
+    assert dialog.room_invite_code.text() == "N7KP"
+    dialog.close()
+
+    member = FakeController()
+    member.online["group"] = {
+        "id": "room-member",
+        "name": "Member room",
+        "invite_code": "D8KM",
+        "owner_id": "someone-else",
+    }
+    member_dialog = _fresh_dialog(SettingsDialog, member)
+    app.processEvents()
+    assert not any(
+        button.text() == "새 초대 코드 만들기" and button.isVisible()
+        for button in member_dialog.home_page.findChildren(QtWidgets.QPushButton)
+    )
+    member_dialog.close()
 
 
 def check_account_states(app, SettingsDialog):
@@ -615,6 +681,7 @@ def main():
 
     check_home_draft_and_save(app, QtWidgets, SettingsDialog)
     check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
+    check_owner_invite_rotation(app, QtWidgets, SettingsDialog)
     check_account_states(app, SettingsDialog)
     check_username_account_creation(SettingsDialog, SupabaseError)
     check_username_login_and_recovery(SettingsDialog)

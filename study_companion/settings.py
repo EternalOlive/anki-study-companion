@@ -21,6 +21,7 @@ from aqt.qt import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QStackedWidget,
@@ -64,6 +65,9 @@ class SettingsDialog(QDialog):
         self._locale_at_open = controller.locale
         self._time_at_open = controller.tracker.time_goal_minutes
         self._answers_at_open = controller.tracker.card_goal
+        self._share_deck_at_open = bool(
+            controller.online.get("share_deck_name", False)
+        )
         self._busy = False
         self._alive = True
         self._controller_signature = None
@@ -155,6 +159,34 @@ class SettingsDialog(QDialog):
         room_section_layout.addLayout(self.room_layout)
         layout.addWidget(room)
 
+        sharing, sharing_layout = self._section(
+            page, self._t("방에 공유하는 정보", "Information shared with the room")
+        )
+        sharing_layout.addWidget(
+            self._note(
+                self._t(
+                    "방 멤버는 공부 시간·답변 수·공부 중 상태를 볼 수 있습니다. "
+                    "방의 하루는 한국 시간(UTC+9) 자정에 바뀝니다.",
+                    "Room members can see your study time, answer count, and studying status. "
+                    "The room day resets at Korean midnight (UTC+9).",
+                )
+            )
+        )
+        self.share_deck_name = QCheckBox(
+            self._t("공부 중인 덱 이름 공유", "Share current deck name"), sharing
+        )
+        self.share_deck_name.setObjectName("shareDeckName")
+        sharing_layout.addWidget(self.share_deck_name)
+        sharing_layout.addWidget(
+            self._note(
+                self._t(
+                    "덱 이름은 선택한 경우에만 같은 방 멤버에게 표시됩니다. 카드 내용은 공유하지 않습니다.",
+                    "The deck name is shown only to room members when enabled. Card contents are not shared.",
+                )
+            )
+        )
+        layout.addWidget(sharing)
+
         goals, goals_layout = self._section(
             page, self._t("일일 목표", "Daily goals")
         )
@@ -233,6 +265,7 @@ class SettingsDialog(QDialog):
         self.time_goal.valueChanged.connect(self._update_save_enabled)
         self.answer_goal.valueChanged.connect(self._update_save_enabled)
         self.language.currentIndexChanged.connect(self._update_save_enabled)
+        self.share_deck_name.toggled.connect(self._update_save_enabled)
         return page
 
     def _detail_page(self, title):
@@ -256,6 +289,7 @@ class SettingsDialog(QDialog):
 
     def _build_create_page(self):
         page, layout = self._detail_page(self._t("방 만들기", "Create a room"))
+        layout.addWidget(self._room_participation_notice(page))
         form = QFormLayout()
         self.group_name = QLineEdit(page)
         self.group_name.setObjectName("groupName")
@@ -273,6 +307,7 @@ class SettingsDialog(QDialog):
 
     def _build_join_page(self):
         page, layout = self._detail_page(self._t("방 참여", "Join a room"))
+        layout.addWidget(self._room_participation_notice(page))
         form = QFormLayout()
         self.invite_code = QLineEdit(page)
         self.invite_code.setObjectName("inviteCode")
@@ -288,6 +323,21 @@ class SettingsDialog(QDialog):
         )
         layout.addLayout(row)
         return page
+
+    def _room_participation_notice(self, parent):
+        label = QLabel(
+            self._t(
+                "방에 참여하면 공부 시간·답변 수·공부 중 상태가 멤버에게 공유됩니다. "
+                "선택한 경우에만 덱 이름도 공유하며, 카드 내용은 공유하지 않습니다. "
+                "방의 하루는 한국 시간(UTC+9) 자정에 바뀝니다.",
+                "Creating or joining a room shares your study time, answer count, and studying status "
+                "with its members. Your deck name is shared only when enabled; card contents are not shared. "
+                "The room day resets at Korean midnight (UTC+9).",
+            ),
+            parent,
+        )
+        label.setWordWrap(True)
+        return label
 
     def _build_leave_page(self):
         page, layout = self._detail_page(self._t("방 나가기", "Leave room"))
@@ -496,6 +546,7 @@ class SettingsDialog(QDialog):
             group.get("id"),
             group.get("name"),
             group.get("invite_code"),
+            group.get("owner_id"),
             online.get("display_name"),
             online.get("account_kind"),
             online.get("email"),
@@ -520,6 +571,7 @@ class SettingsDialog(QDialog):
 
     def _refresh_room_section(self):
         _clear_layout(self.room_layout)
+        self.rotate_invite_button = None
         group = self.controller.online.get("group")
         if group:
             name = QLabel(
@@ -544,6 +596,16 @@ class SettingsDialog(QDialog):
             row.addWidget(self.copy_feedback)
             row.addStretch(1)
             self.room_layout.addLayout(row)
+            user_id = (self.controller.online.get("auth") or {}).get("user_id")
+            if user_id and group.get("owner_id") == user_id:
+                rotate_row = QHBoxLayout()
+                rotate_row.addStretch(1)
+                self.rotate_invite_button = QPushButton(
+                    self._t("새 초대 코드 만들기", "Generate new invite code"), self
+                )
+                self.rotate_invite_button.clicked.connect(self.rotate_invite_code)
+                rotate_row.addWidget(self.rotate_invite_button)
+                self.room_layout.addLayout(rotate_row)
             leave_row = QHBoxLayout()
             leave_row.addStretch(1)
             leave = QPushButton(self._t("방 나가기", "Leave room"), self)
@@ -752,6 +814,7 @@ class SettingsDialog(QDialog):
             self.time_goal.value() != self._time_at_open
             or self.answer_goal.value() != self._answers_at_open
             or self.language.currentData() != self._locale_at_open
+            or self.share_deck_name.isChecked() != self._share_deck_at_open
         )
 
     def _update_save_enabled(self, *_args):
@@ -763,6 +826,10 @@ class SettingsDialog(QDialog):
         self._locale_at_open = self.controller.locale
         self.time_goal.setValue(self._time_at_open)
         self.answer_goal.setValue(self._answers_at_open)
+        self._share_deck_at_open = bool(
+            self.controller.online.get("share_deck_name", False)
+        )
+        self.share_deck_name.setChecked(self._share_deck_at_open)
         index = self.language.findData(self._locale_at_open)
         self.language.setCurrentIndex(max(index, 0))
         self._update_save_enabled()
@@ -771,8 +838,11 @@ class SettingsDialog(QDialog):
         previous_time = self.controller.tracker.time_goal_minutes
         previous_answers = self.controller.tracker.card_goal
         previous_locale = self.controller.locale
+        had_share_deck = "share_deck_name" in self.controller.online
+        previous_share_deck = self.controller.online.get("share_deck_name")
         self.controller.tracker.time_goal_minutes = self.time_goal.value()
         self.controller.tracker.card_goal = self.answer_goal.value()
+        self.controller.online["share_deck_name"] = self.share_deck_name.isChecked()
         locale = self.language.currentData()
         self.controller.locale = locale if locale in ("ko", "en") else "ko"
         try:
@@ -781,6 +851,10 @@ class SettingsDialog(QDialog):
             self.controller.tracker.time_goal_minutes = previous_time
             self.controller.tracker.card_goal = previous_answers
             self.controller.locale = previous_locale
+            if had_share_deck:
+                self.controller.online["share_deck_name"] = previous_share_deck
+            else:
+                self.controller.online.pop("share_deck_name", None)
             self.controller.refresh()
             self._set_message(
                 self.home_error,
@@ -793,6 +867,75 @@ class SettingsDialog(QDialog):
         self.controller.refresh()
         self.controller.sync_async(force=True)
         self.accept()
+
+    def _confirm_invite_rotation(self):
+        answer = QMessageBox.question(
+            self,
+            self._t("초대 코드 변경", "Replace invite code"),
+            self._t(
+                "새 코드를 만들면 기존 초대 코드는 즉시 사용할 수 없습니다. "
+                "현재 멤버와 기록은 그대로 유지됩니다.",
+                "Generating a new code immediately invalidates the old invite code. "
+                "Current members and records are kept.",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def rotate_invite_code(self):
+        group = dict(self.controller.online.get("group") or {})
+        group_id = group.get("id")
+        user_id = (self.controller.online.get("auth") or {}).get("user_id")
+        if (
+            not group_id
+            or not user_id
+            or group.get("owner_id") != user_id
+            or self.rotate_invite_button is None
+        ):
+            return
+        if not self._confirm_invite_rotation():
+            return
+        if not self._begin_remote(self.home_error):
+            return
+
+        def success(code):
+            self._finish_remote()
+            code = str(code or "").strip().upper()
+            allowed = set("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+            if len(code) != 4 or any(character not in allowed for character in code):
+                if self._valid():
+                    self._set_message(
+                        self.home_error,
+                        self._t(
+                            "새 초대 코드를 받지 못했습니다.",
+                            "The new invite code was not returned.",
+                        ),
+                    )
+                return
+            current = self.controller.online.get("group") or {}
+            if current.get("id") == group_id:
+                current["invite_code"] = code
+                self.controller.save()
+                if self._valid():
+                    self.refresh_from_controller()
+
+        self.controller._run_authenticated_action(
+            [self.rotate_invite_button],
+            lambda token: self.controller.client.rotate_invite(token, group_id),
+            success,
+            self._t(
+                "초대 코드를 바꾸지 못했습니다.",
+                "Could not replace the invite code.",
+            ),
+            on_error=self._remote_error(
+                self.home_error,
+                self._t(
+                    "초대 코드를 바꾸지 못했습니다.",
+                    "Could not replace the invite code.",
+                ),
+            ),
+        )
 
     def copy_invite_code(self):
         code = self.room_invite_code.text()
@@ -862,6 +1005,11 @@ class SettingsDialog(QDialog):
                         ),
                     )
                 return
+            group = dict(group)
+            group.setdefault(
+                "owner_id",
+                (self.controller.online.get("auth") or {}).get("user_id"),
+            )
             self.controller.online["group"] = group
             self.controller.save()
             self.controller.sync_async(force=True)

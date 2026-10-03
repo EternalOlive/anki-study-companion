@@ -29,6 +29,14 @@ class SupabaseError(RuntimeError):
         self.status = status
 
 
+class DeviceSnapshotConflict(SupabaseError):
+    """A server snapshot proves that local sync state was restored or reset."""
+
+    def __init__(self, stored):
+        super().__init__("기록 복원 상태 확인 중 / Checking restored sync state")
+        self.stored = stored
+
+
 def load_or_create_device_id(path: Path, machine_marker: str | None = None) -> str:
     """Return an opaque installation ID that is not part of Anki profile sync.
 
@@ -156,6 +164,82 @@ class DeviceSyncLedger:
         day_state = self.state.get("accounts", {}).get(user_id, {}).get(day)
         if day_state and int(day_state.get("revision", 0)) == int(revision):
             day_state["acknowledged_revision"] = int(revision)
+
+    def rebase_from_server(
+        self,
+        *,
+        user_id: str,
+        day: str,
+        active_seconds: int,
+        answer_count: int,
+        stored: dict[str, Any],
+    ) -> dict[str, int]:
+        """Resume a restored device stream without replaying old local totals.
+
+        A restored profile can contain a ledger revision older than the row
+        already stored for this device.  The server row is authoritative only
+        when it is demonstrably at least as new and its counters have not gone
+        backwards.  Current local totals become a new segment baseline: only
+        study recorded after this call is added to the server totals.
+
+        This deliberately does not guess which part of the restored local
+        history was already uploaded.  Callers should surface the returned
+        baseline values as a recovery notice rather than claiming a lossless
+        merge.
+        """
+        def nonnegative_integer(value: Any, field: str) -> int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"invalid server recovery {field}")
+            if value < 0:
+                raise ValueError(f"invalid server recovery {field}")
+            return value
+
+        server_revision = nonnegative_integer(stored.get("revision"), "revision")
+        server_seconds = nonnegative_integer(
+            stored.get("active_seconds"), "active_seconds"
+        )
+        server_answers = nonnegative_integer(
+            stored.get("answer_count"), "answer_count"
+        )
+        local_seconds = nonnegative_integer(active_seconds, "local active_seconds")
+        local_answers = nonnegative_integer(answer_count, "local answer_count")
+
+        accounts = self.state["accounts"]
+        day_state = accounts.get(user_id, {}).get(day, {})
+        local_revision = nonnegative_integer(day_state.get("revision", 0), "local revision")
+        known_seconds = nonnegative_integer(
+            day_state.get("seconds_total", 0), "known active_seconds"
+        )
+        known_answers = nonnegative_integer(
+            day_state.get("answers_total", 0), "known answer_count"
+        )
+        if server_revision < local_revision:
+            raise ValueError("server recovery revision is older than the local ledger")
+        if server_seconds < known_seconds or server_answers < known_answers:
+            raise ValueError("server recovery counters are older than the local ledger")
+
+        day_state = accounts.setdefault(user_id, {}).setdefault(day, {})
+        day_state.clear()
+        day_state.update(
+            {
+                "seconds_total": server_seconds,
+                "answers_total": server_answers,
+                "segment_seconds": local_seconds,
+                "segment_answers": local_answers,
+                "revision": server_revision,
+                "acknowledged_revision": server_revision,
+            }
+        )
+        self.state["active_user"] = user_id
+        self.state["active_day"] = day
+        self.state.pop("baseline_on_next_activation", None)
+        return {
+            "server_revision": server_revision,
+            "server_active_seconds": server_seconds,
+            "server_answer_count": server_answers,
+            "baselined_local_seconds": local_seconds,
+            "baselined_local_answers": local_answers,
+        }
 
     def _advance(
         self, user_id: str, day: str, active_seconds: int, answer_count: int
@@ -290,12 +374,34 @@ class SupabaseClient:
         }
 
     def join_group(self, token: str, code: str) -> Any:
-        return self._request(
-            "POST",
-            "/rest/v1/rpc/join_study_group",
-            token=token,
-            body={"code": code},
+        try:
+            result = self._request(
+                "POST", "/rest/v1/rpc/join_study_group_safe",
+                token=token, body={"code": code},
+            )
+        except SupabaseError as error:
+            if error.status == 404:
+                raise SupabaseError(
+                    "서버 업데이트가 필요합니다. 잠시 후 다시 시도하세요. / "
+                    "The room server must be updated before joining.", status=503
+                ) from error
+            raise
+        if not isinstance(result, dict) or not result.get("ok"):
+            if isinstance(result, dict) and result.get("error") == "TOO_MANY_ATTEMPTS":
+                raise SupabaseError("초대 코드 시도가 너무 많습니다. 잠시 후 다시 시도하세요. / Too many attempts. Try again later.", status=429)
+            raise SupabaseError("초대 코드를 확인해 주세요. / Check the invite code.", status=400)
+        if not result.get("group_id"):
+            raise SupabaseError("방 참여 결과를 확인할 수 없습니다. / Missing room confirmation.")
+        return result["group_id"]
+
+    def rotate_invite(self, token: str, group_id: str) -> str:
+        result = self._request(
+            "POST", "/rest/v1/rpc/rotate_study_group_invite", token=token,
+            body={"target_group": group_id},
         )
+        if not isinstance(result, str) or len(result) != 4:
+            raise SupabaseError("초대 코드 재발급 결과를 확인할 수 없습니다. / Missing invite code.")
+        return result
 
     def leave_group(self, token: str, group_id: str) -> Any:
         return self._request(
@@ -378,12 +484,14 @@ class SupabaseClient:
         stored = self._first(result)
         if not isinstance(stored, dict) or not stored:
             raise SupabaseError("기기별 기록 저장 결과를 확인할 수 없습니다")
-        if stored.get("revision") != revision:
-            raise SupabaseError(
-                "로컬 동기화 상태와 서버 기록이 일치하지 않습니다. "
-                "이전 파일을 복원했다면 새 기록이 저장되었다고 간주하지 마세요. "
-                "기기 동기화 상태 복구가 필요합니다."
-            )
+        if (stored.get("revision") != revision
+                or stored.get("active_seconds") != active_seconds
+                or stored.get("answer_count") != answer_count):
+            for key, expected in (("group_id", group_id), ("device_id", device_id),
+                                  ("study_day", study_day)):
+                if stored.get(key) != expected:
+                    raise SupabaseError("서버 기록 식별자가 일치하지 않습니다. / Snapshot identity mismatch.")
+            raise DeviceSnapshotConflict(stored)
         return stored
 
     def set_current_deck(self, token: str, group_id: str, device_id: str,

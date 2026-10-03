@@ -160,6 +160,10 @@ def main() -> int:
     tracker.status = "studying"
 
     controller = FakeController(tracker, current)
+    controller.online["members"].append({
+        "user_id": "self", "study_day": today,
+        "active_seconds": 30 * 60, "answer_count": 60,
+    })
     panel = StudyPanel(controller)
     panel.resize(320, 720)
     panel.show()
@@ -193,7 +197,9 @@ def main() -> int:
     online_row = panel.member_rows["friend-b"]
     assert online_row.dot.text() == "○" and online_row.dot.isVisible()
     assert online_row.dot.styleSheet() == ""
-    assert panel.own_time.text() == "24:10 / 60분"
+    assert panel.own_time.text() == "30:00 / 60분"
+    assert panel.own_answers.text() == "60 / 100"
+    assert "24분" in panel.own_title.toolTip()
     assert panel.collapse_panel.toolTip() == "패널 접기"
     assert panel.format_duration(3600) == "1시간 00분"
     assert panel.format_clock(3661) == "1시간 01분"
@@ -223,9 +229,9 @@ def main() -> int:
 
     assert panel.member_order == original_order
     assert first_row.expanded and first_row.details.isVisible()
-    assert panel.own_title.text() == "This PC · today"
+    assert panel.own_title.text() == "You · all PCs"
     assert "Current deck  영어::<단어>" in first_row.details.text()
-    assert panel.own_time.text() == "24:10 / 60m"
+    assert panel.own_time.text() == "30:00 / 60m"
     assert panel.history_toggle.isChecked()
     assert panel.collapse_panel.toolTip() == "Collapse panel"
     assert panel.format_duration(3600) == "1h 00m"

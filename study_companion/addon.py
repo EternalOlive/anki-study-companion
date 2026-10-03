@@ -25,6 +25,7 @@ from aqt.utils import showWarning
 
 from .online import (
     DeviceSyncLedger,
+    DeviceSnapshotConflict,
     SupabaseClient,
     SupabaseError,
     load_or_create_device_id,
@@ -509,7 +510,9 @@ class Controller:
         record = self.tracker.today(current)
         payloads = []
         current_deck_name = (
-            self.tracker.current_deck_name if self.tracker.status == "studying" else None
+            self.tracker.current_deck_name
+            if self.online.get("share_deck_name", False) and self.tracker.status == "studying"
+            else None
         )
         if group:
             study_day = current.date().isoformat()
@@ -604,6 +607,10 @@ class Controller:
         else:
             sync_route_epoch = None
 
+        recovery_baselines = {
+            item["study_day"]: dict(self.tracker.records.get(item["study_day"], {}))
+            for item in payloads
+        }
         def task():
             if auth.get("refresh_token") and time.time() >= auth.get("expires_at", 0) - 60:
                 try:
@@ -644,6 +651,8 @@ class Controller:
                             status=queued["status"],
                         )
                         acknowledgements.append((queued, acknowledgement["revision"]))
+                    except DeviceSnapshotConflict as error:
+                        acknowledgements.append((queued, error))
                     except SupabaseError as error:
                         if error.status == 401:
                             raise
@@ -712,6 +721,23 @@ class Controller:
                 updated_auth, acknowledgements, members, sync_error = future.result()
                 self.online["auth"] = updated_auth
                 for acknowledged_payload, acknowledged_revision in acknowledgements:
+                    if isinstance(acknowledged_revision, DeviceSnapshotConflict):
+                        baseline = recovery_baselines[acknowledged_payload["study_day"]]
+                        stored = acknowledged_revision.stored
+                        if stored.get("user_id") != auth["user_id"]:
+                            raise SupabaseError("복원 기록 계정이 일치하지 않습니다. / Restored account mismatch.")
+                        self.device_ledger.rebase_from_server(
+                            user_id=acknowledged_payload.get("ledger_id", auth["user_id"]),
+                            day=acknowledged_payload["study_day"],
+                            active_seconds=int(baseline.get("seconds", 0)),
+                            answer_count=int(baseline.get("answers", 0)), stored=stored,
+                        )
+                        self.sync_outbox.resolve_server_conflict(acknowledged_payload, stored)
+                        self.online["recovery_notice"] = self.t(
+                            "서버 기록을 기준으로 다시 연결했습니다. 복원 후 재연결 전 기록은 중복 여부를 확인할 수 없어 자동 합치지 않았습니다.",
+                            "Reconnected using server totals. Study between restoration and reconnection was not merged because duplicates could not be ruled out.",
+                        )
+                        continue
                     self.device_ledger.acknowledge(
                         acknowledged_payload.get("ledger_id", auth["user_id"]),
                         acknowledged_payload["study_day"],

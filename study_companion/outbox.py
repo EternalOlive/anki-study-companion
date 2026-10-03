@@ -21,6 +21,7 @@ class SyncOutbox:
         self.state.setdefault("routes", {})
         self.state.setdefault("route_sequence", 0)
         self.state.setdefault("legacy_owners", {})
+        self.state.setdefault("recovery_events", [])
 
     def bind_device(self, device_id: str) -> None:
         previous = self.state.get("installation_id")
@@ -30,7 +31,7 @@ class SyncOutbox:
             self.state.clear()
             self.state.update(
                 {"entries": {}, "routes": {}, "route_sequence": 0,
-                 "legacy_owners": {}}
+                 "legacy_owners": {}, "recovery_events": []}
             )
         self.state["installation_id"] = device_id
 
@@ -74,6 +75,90 @@ class SyncOutbox:
             del self.state["entries"][key]
             return True
         return False
+
+    def resolve_server_conflict(
+        self, payload: dict[str, Any], stored: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Retire one stale retry only with matching authoritative evidence.
+
+        The server response must identify the exact account/room/device/day and
+        prove that its revision or cumulative counters differ.  A newer queued
+        snapshot is never removed.  Invalid or incomplete evidence raises and
+        leaves the queue untouched so the UI can offer an actionable recovery
+        error instead of silently resetting data.
+        """
+        identity = {
+            "user_id": "user_id",
+            "group_id": "group_id",
+            "device_id": "device_id",
+            "study_day": "study_day",
+        }
+        for payload_field, stored_field in identity.items():
+            if not payload.get(payload_field) or not stored.get(stored_field):
+                raise ValueError("server recovery identity is incomplete")
+            if str(payload[payload_field]) != str(stored[stored_field]):
+                raise ValueError("server recovery identity does not match the queued snapshot")
+
+        def nonnegative_integer(value: Any, field: str) -> int:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"invalid server recovery {field}")
+            if value < 0:
+                raise ValueError(f"invalid server recovery {field}")
+            return value
+
+        queued_revision = nonnegative_integer(payload.get("revision"), "queued revision")
+        server_revision = nonnegative_integer(stored.get("revision"), "revision")
+        queued_seconds = nonnegative_integer(
+            payload.get("active_seconds"), "queued active_seconds"
+        )
+        server_seconds = nonnegative_integer(
+            stored.get("active_seconds"), "active_seconds"
+        )
+        queued_answers = nonnegative_integer(
+            payload.get("answer_count"), "queued answer_count"
+        )
+        server_answers = nonnegative_integer(
+            stored.get("answer_count"), "answer_count"
+        )
+        if server_revision < queued_revision:
+            raise ValueError("server recovery revision is older than the queued snapshot")
+        if (
+            server_revision == queued_revision
+            and server_seconds == queued_seconds
+            and server_answers == queued_answers
+        ):
+            raise ValueError("server response acknowledges the queued snapshot; no recovery needed")
+
+        key = self.key(
+            str(payload["user_id"]),
+            str(payload["group_id"]),
+            str(payload["device_id"]),
+            str(payload["study_day"]),
+        )
+        current = self.state["entries"].get(key)
+        removed = bool(
+            current
+            and int(current.get("revision", -1)) == queued_revision
+        )
+        if removed:
+            del self.state["entries"][key]
+        event = {
+            "user_id": str(payload["user_id"]),
+            "group_id": str(payload["group_id"]),
+            "device_id": str(payload["device_id"]),
+            "study_day": str(payload["study_day"]),
+            "queued_revision": queued_revision,
+            "server_revision": server_revision,
+            "queued_active_seconds": queued_seconds,
+            "server_active_seconds": server_seconds,
+            "queued_answer_count": queued_answers,
+            "server_answer_count": server_answers,
+            "removed": removed,
+        }
+        events = self.state["recovery_events"]
+        events.append(event)
+        del events[:-20]
+        return dict(event)
 
     def discard_room(self, user_id: str, group_id: str) -> int:
         doomed = [

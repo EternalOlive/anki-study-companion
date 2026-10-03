@@ -5,13 +5,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
-from study_companion.online import DeviceSyncLedger, SupabaseError
+from study_companion.online import DeviceSyncLedger, SupabaseError, DeviceSnapshotConflict
 from study_companion.outbox import SyncOutbox
 
 
 class FakeClient:
     def __init__(self):
         self.calls = []
+        self.deck_calls = []
         self.fail_days = set()
 
     def upsert_profile(self, token, user_id, display_name):
@@ -27,6 +28,7 @@ class FakeClient:
         return []
 
     def set_current_deck(self, token, group_id, device_id, deck_name):
+        self.deck_calls.append((group_id, device_id, deck_name))
         return None
 
 
@@ -48,6 +50,7 @@ class OfflineSyncTests(unittest.TestCase):
             "now": lambda: cls.clock,
             "canonical_nickname": lambda user_id: "ABC-DEF",
             "SupabaseError": SupabaseError,
+            "DeviceSnapshotConflict": DeviceSnapshotConflict,
             "time": SimpleNamespace(time=lambda: 0),
             "mw": SimpleNamespace(
                 taskman=SimpleNamespace(
@@ -122,6 +125,24 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertEqual(by_day["2026-10-03"]["answer_count"], 8)
         self.assertEqual(by_day["2026-10-03"]["status"], "stopped")
         self.controller.save.assert_called_once()
+
+    def test_deck_name_sharing_is_opt_in_and_off_clears_server_value(self):
+        self.controller.sync_async()
+        task, _done = self.take_background()
+        task()
+        self.assertEqual(
+            self.controller.client.deck_calls[-1], ("room-a", "device-a", None)
+        )
+
+        self.controller.sync_in_flight = False
+        self.controller.online["share_deck_name"] = True
+        self.controller.sync_async()
+        task, _done = self.take_background()
+        task()
+        self.assertEqual(
+            self.controller.client.deck_calls[-1],
+            ("room-a", "device-a", "English"),
+        )
 
     def test_partial_failure_acks_success_and_keeps_only_failed_day(self):
         self.controller.client.fail_days.add("2026-10-03")

@@ -141,6 +141,59 @@ class OfflineOutboxTests(unittest.TestCase):
         )
         self.assertGreater(outbox.route_epoch("device-a"), first)
 
+    def test_server_conflict_retires_only_the_exact_stale_retry(self):
+        outbox = SyncOutbox({})
+        stale = snapshot(revision=2, active_seconds=120, answer_count=8)
+        outbox.enqueue(stale)
+        event = outbox.resolve_server_conflict(
+            stale,
+            {
+                "user_id": "user-a", "group_id": "room-a",
+                "device_id": "device-a", "study_day": "2026-10-03",
+                "revision": 3, "active_seconds": 180, "answer_count": 12,
+            },
+        )
+
+        self.assertTrue(event["removed"])
+        self.assertEqual(outbox.state["entries"], {})
+        self.assertEqual(outbox.state["recovery_events"], [event])
+
+    def test_server_conflict_never_removes_a_newer_queued_snapshot(self):
+        outbox = SyncOutbox({})
+        in_flight = snapshot(revision=2, active_seconds=120, answer_count=8)
+        outbox.enqueue(snapshot(revision=4, active_seconds=200, answer_count=14))
+        event = outbox.resolve_server_conflict(
+            in_flight,
+            {
+                "user_id": "user-a", "group_id": "room-a",
+                "device_id": "device-a", "study_day": "2026-10-03",
+                "revision": 3, "active_seconds": 180, "answer_count": 12,
+            },
+        )
+
+        self.assertFalse(event["removed"])
+        pending = outbox.pending(
+            user_id="user-a", group_id="room-a", device_id="device-a"
+        )
+        self.assertEqual(pending[0]["revision"], 4)
+
+    def test_invalid_recovery_evidence_preserves_the_queue(self):
+        outbox = SyncOutbox({})
+        stale = snapshot(revision=2)
+        outbox.enqueue(stale)
+        before = copy.deepcopy(outbox.state)
+
+        with self.assertRaises(ValueError):
+            outbox.resolve_server_conflict(
+                stale,
+                {
+                    "user_id": "user-a", "group_id": "another-room",
+                    "device_id": "device-a", "study_day": "2026-10-03",
+                    "revision": 3, "active_seconds": 60, "answer_count": 5,
+                },
+            )
+        self.assertEqual(outbox.state, before)
+
 
 if __name__ == "__main__":
     unittest.main()
