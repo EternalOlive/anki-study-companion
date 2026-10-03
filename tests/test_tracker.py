@@ -15,6 +15,29 @@ def moment(hour=10, minute=0, second=0):
 
 
 class StudyTrackerTest(unittest.TestCase):
+    def test_review_input_resumes_without_counting_time_away(self):
+        tracker = StudyTracker()
+        tracker.enter_review(moment())
+        tracker.pause(moment(second=10))
+        tracker.input(moment(minute=5))
+        tracker.tick(moment(minute=5, second=20))
+        self.assertEqual(tracker.status, "studying")
+        self.assertEqual(tracker.today(moment()), {"seconds": 30, "answers": 0})
+
+    def test_input_after_idle_starts_a_new_interval(self):
+        tracker = StudyTracker()
+        tracker.enter_review(moment())
+        tracker.input(moment(minute=5))
+        tracker.tick(moment(minute=5, second=10))
+        self.assertEqual(tracker.today(moment())["seconds"], 70)
+
+    def test_input_outside_review_does_not_start_timer(self):
+        tracker = StudyTracker()
+        tracker.input(moment())
+        tracker.tick(moment(second=30))
+        self.assertEqual(tracker.status, "stopped")
+        self.assertEqual(tracker.today(moment())["seconds"], 0)
+
     def test_answers_per_minute_keeps_fractional_pace(self):
         self.assertAlmostEqual(answers_per_minute(1500, 42), 1.68)
         self.assertIsNone(answers_per_minute(0, 42))

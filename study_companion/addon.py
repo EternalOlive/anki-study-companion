@@ -43,10 +43,19 @@ class InputWatcher(QObject):
             if event.type() in (
                 QEvent.Type.KeyPress,
                 QEvent.Type.MouseButtonPress,
-                QEvent.Type.MouseMove,
                 QEvent.Type.Wheel,
             ) and mw.isActiveWindow():
-                self.controller.input()
+                if event.type() == QEvent.Type.KeyPress and event.isAutoRepeat():
+                    return False
+                # Only interaction with the review webviews counts as study.
+                review = getattr(mw, "reviewer", None)
+                views = (getattr(mw, "web", None), getattr(review, "bottom", None))
+                target = watched
+                while target is not None:
+                    if target in views:
+                        self.controller.input()
+                        break
+                    target = target.parent()
             elif event.type() == QEvent.Type.ApplicationDeactivate:
                 self.controller.pause()
         return False
@@ -160,14 +169,14 @@ class Controller:
 
     def refresh(self):
         record = self.tracker.today(now())
-        minutes, seconds = divmod(int(record["seconds"]), 60)
+        duration = self.panel_body.format_clock(int(record["seconds"]))
         status = {"studying": self.t("공부 중", "Studying"), "paused": self.t("잠시 멈춤", "Paused"), "stopped": self.t("접속 중", "Online")}[
             self.tracker.status
         ]
         time_goal = f"/{self.tracker.time_goal_minutes}{self.t('분', 'm')}" if self.tracker.time_goal_minutes else ""
         card_goal = f"/{self.tracker.card_goal}" if self.tracker.card_goal else ""
         self.label.setText(
-            f"{self.t('오늘', 'Today')} {minutes:02d}:{seconds:02d}{time_goal}  "
+            f"{self.t('오늘', 'Today')} {duration}{time_goal}  "
             f"{self.t('답변', 'Answers')} {record['answers']}{card_goal}  {status}"
         )
         self.refresh_panel()

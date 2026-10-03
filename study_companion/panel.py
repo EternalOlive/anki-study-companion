@@ -399,10 +399,12 @@ class StudyPanel(QWidget):
         minutes = max(0, int(seconds) // 60)
         if minutes >= 60:
             hours, remaining = divmod(minutes, 60)
-            return f"{hours}:{remaining:02d}"
+            return self.tr(f"{hours}시간 {remaining:02d}분", f"{hours}h {remaining:02d}m")
         return self.tr(f"{minutes}분", f"{minutes}m")
 
     def format_clock(self, seconds: int) -> str:
+        if seconds >= 3600:
+            return self.format_duration(seconds)
         minutes, remaining = divmod(max(0, int(seconds)), 60)
         return f"{minutes:02d}:{remaining:02d}"
 

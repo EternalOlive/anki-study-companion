@@ -179,6 +179,9 @@ def main() -> int:
     assert online_row.dot.styleSheet() == ""
     assert panel.own_time.text() == "24:10 / 60분"
     assert panel.collapse_panel.toolTip() == "패널 접기"
+    assert panel.format_duration(3600) == "1시간 00분"
+    assert panel.format_clock(3661) == "1시간 01분"
+    assert panel.format_clock(3599) == "59:59"
     panel.set_collapsed(True)
     app.processEvents()
     assert panel.collapsed
@@ -208,6 +211,7 @@ def main() -> int:
     assert panel.own_time.text() == "24:10 / 60m"
     assert panel.history_toggle.isChecked()
     assert panel.collapse_panel.toolTip() == "Collapse panel"
+    assert panel.format_duration(3600) == "1h 00m"
 
     english = OUTPUT / "native-en.png"
     if not panel.grab().save(str(english)):

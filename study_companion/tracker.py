@@ -83,6 +83,9 @@ class StudyTracker:
 
     def input(self, now: datetime) -> None:
         self.tick(now)
+        if self.status == "paused":
+            self.status = "studying"
+            self.counted_until = now
         if self.status == "studying":
             self.last_input_at = now
 
