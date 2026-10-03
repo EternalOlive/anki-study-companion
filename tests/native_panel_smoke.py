@@ -165,7 +165,7 @@ def main() -> int:
 
     first_key = panel.member_order[0]
     first_row = panel.member_rows[first_key]
-    first_row.toggle_expanded()
+    first_row.identity.click()
     panel.history_toggle.setChecked(True)
     app.processEvents()
 
@@ -217,9 +217,63 @@ def main() -> int:
     if not panel.grab().save(str(english)):
         raise RuntimeError(f"could not save {english}")
 
+    panel.close()
+
+    # A 150% text-size approximation at the documented 280px minimum width.
+    # Long translated labels and names must reflow instead of disappearing
+    # behind the disabled horizontal scrollbar.
+    large_font = QtGui.QFont(family, 9)
+    large_font.setPointSizeF(13.5)
+    app.setFont(large_font)
+    controller.locale = "ko"
+    controller.online["group"]["name"] = "아주 긴 이름의 주말 아침 스터디방"
+    long_member = next(
+        member
+        for member in controller.online["members"]
+        if member["user_id"] == "friend-a"
+    )
+    long_member["display_name"] = "아침마다도서관창가에서공부하는친구"
+    long_member["active_seconds"] = 6 * 3600 + 25 * 60
+    large = StudyPanel(controller)
+    large.resize(280, 760)
+    large.show()
+    app.processEvents()
+
+    large_row = large.member_rows["friend-a"]
+    assert large._own_compact
+    assert large_row._compact
+    assert large.member_scroll.horizontalScrollBar().maximum() == 0
+    assert large.member_body.width() <= large.member_scroll.viewport().width()
+    assert large_row.identity.toolTip().startswith("아침마다도서관")
+    assert large.own_time.geometry().right() <= large.content.width()
+    assert large.own_answers.geometry().right() <= large.content.width()
+
+    korean_large = OUTPUT / "native-ko-large-280.png"
+    if not large.grab().save(str(korean_large)):
+        raise RuntimeError(f"could not save {korean_large}")
+
+    controller.locale = "en"
+    controller.online["group"]["name"] = "Saturday Morning Language Study Room"
+    long_member["display_name"] = "FriendWithAnIntentionallyLongDisplayName"
+    large.resize(320, 760)
+    large.refresh()
+    app.processEvents()
+    large_row = large.member_rows["friend-a"]
+    assert large_row._compact
+    assert large.member_scroll.horizontalScrollBar().maximum() == 0
+    assert large.member_body.width() <= large.member_scroll.viewport().width()
+    assert large_row.identity.toolTip().startswith("FriendWith")
+    assert "\u200b" in large_row.identity_text.text()
+
+    english_large = OUTPUT / "native-en-large-320.png"
+    if not large.grab().save(str(english_large)):
+        raise RuntimeError(f"could not save {english_large}")
+
     print(f"native panel smoke ok: {korean}")
     print(f"native panel smoke ok: {english}")
-    panel.close()
+    print(f"native panel smoke ok: {korean_large}")
+    print(f"native panel smoke ok: {english_large}")
+    large.close()
     return 0
 
 

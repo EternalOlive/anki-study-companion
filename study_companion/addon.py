@@ -33,6 +33,7 @@ from .online import (
     profile_device_id,
 )
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
+from .outbox import SyncOutbox
 from .panel import StudyPanel
 from .tracker import (
     StudyTracker,
@@ -101,6 +102,8 @@ class Controller:
             self.online.setdefault("device_sync", {})
         )
         self.device_ledger.bind_device(self.device_id)
+        self.sync_outbox = SyncOutbox(self.online.setdefault("sync_outbox", {}))
+        self.sync_outbox.bind_device(self.device_id)
         self.locale = data.get("language", "ko" if lang.current_lang.startswith("ko") else "en")
         if self.locale not in ("ko", "en"):
             self.locale = "ko"
@@ -319,11 +322,11 @@ class Controller:
         if self._access_token():
             self.sync_async()
             return
-        if self.identity_in_flight or self.online.get("email"):
+        if self.identity_in_flight or self.online.get("email") or self.online.get("username"):
             return
         if self.online.get("guest_id"):
             self.online["last_error"] = (
-                "기존 익명 계정의 접속 정보가 만료되었습니다. 연결한 이메일 계정이 있다면 "
+                "기존 계정의 접속 정보가 만료되었습니다. 연결한 아이디 또는 이메일이 있다면 "
                 "기존 계정 로그인으로 복구해 주세요."
             )
             self.save()
@@ -469,13 +472,6 @@ class Controller:
     def _store_session(self, result, email, display_name):
         user = result.get("user") or {}
         user_id = user.get("id") or result.get("user_id")
-        record = self.tracker.today(now())
-        self.device_ledger.activate(
-            user_id,
-            now().date().isoformat(),
-            int(record["seconds"]),
-            int(record["answers"]),
-        )
         self.online.update(
             {
                 "email": email,
@@ -490,6 +486,13 @@ class Controller:
             }
         )
 
+    def discard_room_outbox(self, user_id, group_id):
+        """Forget only snapshots belonging to a room the account has left."""
+        removed = self.sync_outbox.discard_room(str(user_id), str(group_id))
+        if removed:
+            self.save()
+        return removed
+
     def sync_async(self, force=False):
         if self.closed:
             return
@@ -499,18 +502,71 @@ class Controller:
             return
         if not self._access_token():
             return
+        sync_generation = self.identity_generation
         auth = dict(self.online["auth"])
+        session_token = auth.get("access_token")
         display_name = canonical_nickname(auth["user_id"])
         update_name = self.online.get("display_name") != display_name
         group = dict(self.online.get("group") or {})
         group_id = group.get("id")
         current = now()
         record = self.tracker.today(current)
-        payload = None
+        payloads = []
         if group:
             study_day = current.date().isoformat()
+            previous_route = self.sync_outbox.route(self.device_id)
+            # Local Anki totals are shared across rooms. Namespace the device
+            # ledger by room so joining another room starts at the current
+            # local totals instead of replaying study from the previous room.
+            same_route = (
+                previous_route
+                and previous_route.get("user_id") == auth["user_id"]
+                and previous_route.get("group_id") == group_id
+            )
+            ledger_id = (
+                previous_route.get("ledger_id")
+                if same_route and previous_route.get("ledger_id")
+                else f'{auth["user_id"]}|{group_id}'
+            )
+            # Preserve the already-deployed account/day ledger for its first
+            # room. Once a route is bound, later rooms always get a separate
+            # stream and cannot inherit this room's counters.
+            if (
+                not previous_route
+                and auth["user_id"] in self.device_ledger.state.get("accounts", {})
+                and self.sync_outbox.claim_legacy_ledger(
+                    user_id=auth["user_id"], group_id=group_id,
+                    device_id=self.device_id,
+                )
+            ):
+                ledger_id = auth["user_id"]
+            if (
+                same_route
+                and previous_route.get("study_day") != study_day
+            ):
+                previous_day = previous_route["study_day"]
+                previous_record = self.tracker.records.get(previous_day)
+                if previous_record is not None:
+                    previous_snapshot = self.device_ledger.prepare(
+                        user_id=ledger_id,
+                        day=previous_day,
+                        active_seconds=int(previous_record.get("seconds", 0)),
+                        answer_count=int(previous_record.get("answers", 0)),
+                        time_goal_minutes=self.tracker.time_goal_minutes,
+                        card_goal=self.tracker.card_goal,
+                        status="stopped",
+                    )
+                    previous_payload = {
+                        "user_id": auth["user_id"],
+                        "group_id": group_id,
+                        "device_id": self.device_id,
+                        "study_day": previous_day,
+                        "ledger_id": ledger_id,
+                        **previous_snapshot,
+                    }
+                    self.sync_outbox.enqueue(previous_payload)
             device_snapshot = self.device_ledger.prepare(
-                user_id=auth["user_id"],
+                user_id=ledger_id,
                 day=study_day,
                 active_seconds=int(record["seconds"]),
                 answer_count=int(record["answers"]),
@@ -519,11 +575,23 @@ class Controller:
                 status=self.tracker.status,
             )
             payload = {
+                "user_id": auth["user_id"],
                 "group_id": group["id"],
                 "device_id": self.device_id,
                 "study_day": study_day,
+                "ledger_id": ledger_id,
                 **device_snapshot,
             }
+            self.sync_outbox.enqueue(payload)
+            self.sync_outbox.bind_route(
+                user_id=auth["user_id"], group_id=group_id,
+                device_id=self.device_id, study_day=study_day, ledger_id=ledger_id,
+            )
+            payloads = self.sync_outbox.pending(
+                user_id=auth["user_id"], group_id=group_id,
+                device_id=self.device_id,
+            )
+            sync_route_epoch = self.sync_outbox.route_epoch(self.device_id)
             # The revision and its exact cumulative snapshot must survive a
             # crash before the request; retries then remain idempotent.
             try:
@@ -534,6 +602,8 @@ class Controller:
                     "Upload paused because local records could not be saved. Check disk space and folder permissions.",
                 )
                 return
+        else:
+            sync_route_epoch = None
 
         def task():
             if auth.get("refresh_token") and time.time() >= auth.get("expires_at", 0) - 60:
@@ -558,29 +628,38 @@ class Controller:
             def upload(token):
                 if update_name:
                     self.client.upsert_profile(token, auth["user_id"], display_name)
-                if payload is None:
-                    return None, []
-                acknowledgement = self.client.record_device_day(
-                    token,
-                    group_id=payload["group_id"],
-                    device_id=payload["device_id"],
-                    study_day=payload["study_day"],
-                    revision=payload["revision"],
-                    active_seconds=payload["active_seconds"],
-                    answer_count=payload["answer_count"],
-                    time_goal_minutes=payload["time_goal_minutes"],
-                    card_goal=payload["card_goal"],
-                    status=payload["status"],
-                )
-                members = self.client.fetch_group_today(
-                    token, group["id"], payload["study_day"]
-                )
-                return acknowledgement, members
+                acknowledgements = []
+                first_error = None
+                for queued in payloads:
+                    try:
+                        acknowledgement = self.client.record_device_day(
+                            token,
+                            group_id=queued["group_id"],
+                            device_id=queued["device_id"],
+                            study_day=queued["study_day"],
+                            revision=queued["revision"],
+                            active_seconds=queued["active_seconds"],
+                            answer_count=queued["answer_count"],
+                            time_goal_minutes=queued["time_goal_minutes"],
+                            card_goal=queued["card_goal"],
+                            status=queued["status"],
+                        )
+                        acknowledgements.append((queued, acknowledgement["revision"]))
+                    except SupabaseError as error:
+                        if error.status == 401:
+                            raise
+                        if first_error is None:
+                            first_error = error
+                    except Exception as error:
+                        if first_error is None:
+                            first_error = error
+                members = self.client.fetch_group_today(token, group_id, study_day) if group else []
+                return acknowledgements, members, first_error
             try:
-                acknowledgement, members = upload(token)
+                acknowledgements, members, upload_error = upload(token)
             except SupabaseError as error:
                 if error.status != 401 or not auth.get("refresh_token"):
-                    return auth, None, None, error
+                    return auth, [], None, error
                 try:
                     refreshed = self.client.refresh(auth["refresh_token"])
                     auth.update(
@@ -596,36 +675,50 @@ class Controller:
                         }
                     )
                     token = auth["access_token"]
-                    acknowledgement, members = upload(token)
+                    acknowledgements, members, upload_error = upload(token)
                 except SupabaseError as refresh_error:
                     if refresh_error.status in (400, 401):
                         refresh_error = SupabaseError("로그인이 만료되었습니다.", status=401)
-                    return auth, None, None, refresh_error
+                    return auth, [], None, refresh_error
             except Exception as error:
-                return auth, None, None, error
-            return auth, acknowledgement, members, None
+                return auth, [], None, error
+            return auth, acknowledgements, members, upload_error
 
         def done(future):
             self.sync_in_flight = False
             current_group_id = (self.online.get("group") or {}).get("id")
+            current_token = (self.online.get("auth") or {}).get("access_token")
+            current_route_epoch = self.sync_outbox.route_epoch(self.device_id)
             if (
                 self.closed
+                or self.identity_generation != sync_generation
                 or self.online.get("auth", {}).get("user_id") != auth["user_id"]
+                or current_token != session_token
                 or current_group_id != group_id
+                or (group_id and current_route_epoch != sync_route_epoch)
             ):
+                if self.sync_pending and not self.closed:
+                    self.sync_pending = False
+                    QTimer.singleShot(0, lambda: self.sync_async(force=True))
                 return
             try:
-                updated_auth, acknowledgement, members, sync_error = future.result()
+                updated_auth, acknowledgements, members, sync_error = future.result()
                 self.online["auth"] = updated_auth
-                if sync_error is not None:
-                    raise sync_error
-                if payload is not None and acknowledgement is not None:
+                for acknowledged_payload, acknowledged_revision in acknowledgements:
                     self.device_ledger.acknowledge(
-                        auth["user_id"], payload["study_day"], payload["revision"]
+                        acknowledged_payload.get("ledger_id", auth["user_id"]),
+                        acknowledged_payload["study_day"],
+                        acknowledged_revision,
+                    )
+                    self.sync_outbox.acknowledge(
+                        acknowledged_payload, acknowledged_revision
                     )
                 self.online["display_name"] = display_name
                 self.online["members"] = members
-                self.online.pop("last_error", None)
+                if sync_error is not None:
+                    self.online["last_error"] = str(sync_error)
+                else:
+                    self.online.pop("last_error", None)
                 self.save()
             except SupabaseError as error:
                 if error.status == 401:

@@ -7,6 +7,7 @@ from unittest import TestCase
 from unittest.mock import Mock
 
 from study_companion.online import DeviceSyncLedger
+from study_companion.outbox import SyncOutbox
 
 
 class SyncStartTests(TestCase):
@@ -24,6 +25,7 @@ class SyncStartTests(TestCase):
         self.controller.closed = False
         self.controller.sync_in_flight = False
         self.controller.sync_pending = False
+        self.controller.identity_generation = 0
         self.controller._access_token = lambda: 'token'
         self.controller.online = {'auth': {'user_id': 'u', 'access_token': 'token'},
                                   'group': {'id': 'room'}}
@@ -32,6 +34,7 @@ class SyncStartTests(TestCase):
             time_goal_minutes=60, card_goal=100, status='studying')
         self.controller.device_id = 'device'
         self.controller.device_ledger = DeviceSyncLedger({})
+        self.controller.sync_outbox = SyncOutbox({})
         self.controller.save = Mock()
         self.controller.t = lambda ko, en: ko
 
@@ -57,4 +60,3 @@ class SyncStartTests(TestCase):
     def test_one_timestamp_is_used_for_day_and_record(self):
         self.controller.sync_async()
         self.clock.assert_called_once()
-

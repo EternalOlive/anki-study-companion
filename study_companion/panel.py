@@ -7,6 +7,7 @@ localisation, and network actions stay on the controller.
 from __future__ import annotations
 
 import html
+import re
 from datetime import datetime
 
 from aqt.qt import (
@@ -42,6 +43,12 @@ def _set_font(widget: QWidget, *, scale: float = 1.0, bold: bool = False) -> Non
     widget.setFont(font)
 
 
+def _allow_anywhere_wrap(value: str) -> str:
+    """Give Qt wrap points inside unusually long unbroken display names."""
+
+    return re.sub(r"\S{12,}", lambda match: "\u200b".join(match.group(0)), value)
+
+
 class MemberRow(QWidget):
     """A stable, expandable friend row.
 
@@ -59,9 +66,10 @@ class MemberRow(QWidget):
         layout.setContentsMargins(0, 7, 0, 7)
         layout.setSpacing(5)
 
-        summary = QHBoxLayout()
-        summary.setContentsMargins(0, 0, 0, 0)
-        summary.setSpacing(8)
+        self.summary = QGridLayout()
+        self.summary.setContentsMargins(0, 0, 0, 0)
+        self.summary.setHorizontalSpacing(8)
+        self.summary.setVerticalSpacing(4)
 
         self.dot = QLabel(self)
         self.dot.setText("●")
@@ -70,7 +78,7 @@ class MemberRow(QWidget):
             Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter
         )
         self.dot.setAccessibleName(self.panel.tr("공부 중", "Studying"))
-        summary.addWidget(self.dot)
+        self.summary.addWidget(self.dot, 0, 0)
 
         self.identity = QPushButton(self)
         self.identity.setFlat(True)
@@ -78,23 +86,37 @@ class MemberRow(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         self.identity.setStyleSheet("QPushButton { text-align: left; padding: 2px 0; }")
+        identity_layout = QVBoxLayout(self.identity)
+        identity_layout.setContentsMargins(0, 2, 0, 2)
+        identity_layout.setSpacing(0)
+        self.identity_text = QLabel(self.identity)
+        self.identity_text.setTextFormat(Qt.TextFormat.PlainText)
+        self.identity_text.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+        )
+        self.identity_text.setWordWrap(True)
+        self.identity_text.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        identity_layout.addWidget(self.identity_text)
         self.identity.clicked.connect(self.toggle_expanded)
-        summary.addWidget(self.identity, 1)
+        self.summary.addWidget(self.identity, 0, 1)
 
         self.time = QLabel(self)
         self.time.setMinimumWidth(50)
         self.time.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        summary.addWidget(self.time)
+        self.summary.addWidget(self.time, 0, 2)
 
         self.answers = QLabel(self)
         self.answers.setMinimumWidth(44)
         self.answers.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        summary.addWidget(self.answers)
-        layout.addLayout(summary)
+        self.summary.addWidget(self.answers, 0, 3)
+        self.summary.setColumnStretch(1, 1)
+        layout.addLayout(self.summary)
 
         self.details = QLabel(self)
         self.details.setWordWrap(True)
@@ -102,7 +124,38 @@ class MemberRow(QWidget):
         self.details.hide()
         layout.addWidget(self.details)
 
+        self._compact = False
         self.update_member(member)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        metrics_width = (
+            self.time.sizeHint().width()
+            + self.answers.sizeHint().width()
+            + self.summary.horizontalSpacing()
+        )
+        identity_floor = max(110, self.fontMetrics().horizontalAdvance("MMMMMMMMMM"))
+        compact = self.width() < metrics_width + identity_floor + 34
+        self._set_compact(compact)
+
+    def _set_compact(self, compact: bool) -> None:
+        if compact == self._compact:
+            return
+        self._compact = compact
+        self.summary.removeWidget(self.dot)
+        self.summary.removeWidget(self.identity)
+        self.summary.removeWidget(self.time)
+        self.summary.removeWidget(self.answers)
+        if compact:
+            self.summary.addWidget(self.dot, 0, 0)
+            self.summary.addWidget(self.identity, 0, 1, 1, 3)
+            self.summary.addWidget(self.time, 1, 2)
+            self.summary.addWidget(self.answers, 1, 3)
+        else:
+            self.summary.addWidget(self.dot, 0, 0)
+            self.summary.addWidget(self.identity, 0, 1)
+            self.summary.addWidget(self.time, 0, 2)
+            self.summary.addWidget(self.answers, 0, 3)
 
     def toggle_expanded(self) -> None:
         self.expanded = not self.expanded
@@ -113,7 +166,10 @@ class MemberRow(QWidget):
         status = self.panel.controller._current_member_status(member)
         name = self.panel.member_name(member)
         status_text = self.panel.status_text(status)
-        self.identity.setText(f"{name}  ·  {status_text}")
+        self.identity_text.setText(
+            f"{_allow_anywhere_wrap(name)}  ·  {status_text}"
+        )
+        self.identity.setToolTip(f"{name} · {status_text}")
         self.identity.setAccessibleName(
             self.panel.tr(
                 f"{name}, {status_text}. 목표와 마지막 기록 보기",
@@ -154,6 +210,13 @@ class MemberRow(QWidget):
                 f"Time goal  {time_goal_text}    Answer goal  {answer_goal_text}\n"
                 f"Last update  {updated_text}",
             )
+        )
+        self._set_compact(
+            self.width()
+            < self.time.sizeHint().width()
+            + self.answers.sizeHint().width()
+            + max(110, self.fontMetrics().horizontalAdvance("MMMMMMMMMM"))
+            + 34
         )
 
 
@@ -196,8 +259,14 @@ class StudyPanel(QWidget):
         header_text = QVBoxLayout()
         header_text.setSpacing(1)
         self.room_name = QLabel(self)
+        self.room_name.setTextFormat(Qt.TextFormat.PlainText)
+        self.room_name.setWordWrap(True)
+        self.room_name.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
         _set_font(self.room_name, scale=1.1, bold=True)
         self.room_presence = QLabel(self)
+        self.room_presence.setWordWrap(True)
         header_text.addWidget(self.room_name)
         header_text.addWidget(self.room_presence)
         header.addLayout(header_text, 1)
@@ -228,23 +297,24 @@ class StudyPanel(QWidget):
         own_header.addWidget(self.own_status)
         outer.addLayout(own_header)
 
-        own_values = QGridLayout()
-        own_values.setContentsMargins(0, 0, 0, 0)
-        own_values.setHorizontalSpacing(12)
-        own_values.setVerticalSpacing(2)
+        self.own_values = QGridLayout()
+        self.own_values.setContentsMargins(0, 0, 0, 0)
+        self.own_values.setHorizontalSpacing(12)
+        self.own_values.setVerticalSpacing(2)
         self.own_time = QLabel(self)
         _set_font(self.own_time, scale=1.75, bold=True)
         self.own_answers = QLabel(self)
         _set_font(self.own_answers, scale=1.35, bold=True)
         self.time_caption = QLabel(self)
         self.answer_caption = QLabel(self)
-        own_values.addWidget(self.own_time, 0, 0)
-        own_values.addWidget(self.own_answers, 0, 1)
-        own_values.addWidget(self.time_caption, 1, 0)
-        own_values.addWidget(self.answer_caption, 1, 1)
-        own_values.setColumnStretch(0, 1)
-        own_values.setColumnStretch(1, 1)
-        outer.addLayout(own_values)
+        self.own_values.addWidget(self.own_time, 0, 0)
+        self.own_values.addWidget(self.own_answers, 0, 1)
+        self.own_values.addWidget(self.time_caption, 1, 0)
+        self.own_values.addWidget(self.answer_caption, 1, 1)
+        self.own_values.setColumnStretch(0, 1)
+        self.own_values.setColumnStretch(1, 1)
+        outer.addLayout(self.own_values)
+        self._own_compact = False
 
         outer.addWidget(self._separator())
 
@@ -298,13 +368,16 @@ class StudyPanel(QWidget):
         history_layout = QVBoxLayout(self.history_body)
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_layout.setSpacing(7)
-        selector = QHBoxLayout()
+        self.history_selector = QGridLayout()
+        self.history_selector.setContentsMargins(0, 0, 0, 0)
+        self.history_selector.setHorizontalSpacing(8)
         self.yesterday = QPushButton(self.history_body)
         self.best = QPushButton(self.history_body)
         for button in (self.yesterday, self.best):
             button.setCheckable(True)
             button.setFlat(True)
-            selector.addWidget(button)
+        self.history_selector.addWidget(self.yesterday, 0, 0)
+        self.history_selector.addWidget(self.best, 0, 1)
         self.history_buttons = QButtonGroup(self)
         self.history_buttons.setExclusive(True)
         self.history_buttons.addButton(self.yesterday)
@@ -312,7 +385,8 @@ class StudyPanel(QWidget):
         self.yesterday.setChecked(True)
         self.yesterday.clicked.connect(lambda: self._set_history_mode("yesterday"))
         self.best.clicked.connect(lambda: self._set_history_mode("best"))
-        history_layout.addLayout(selector)
+        history_layout.addLayout(self.history_selector)
+        self._history_compact = False
         self.history_summary = QLabel(self.history_body)
         self.history_summary.setWordWrap(True)
         history_layout.addWidget(self.history_summary)
@@ -332,6 +406,58 @@ class StudyPanel(QWidget):
         outer.addWidget(self.error_box)
 
         self.refresh()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_responsive_layout()
+
+    def _apply_responsive_layout(self) -> None:
+        available = max(0, self.content.width() - 28)
+        own_needed = (
+            max(self.own_time.sizeHint().width(), self.time_caption.sizeHint().width())
+            + max(
+                self.own_answers.sizeHint().width(),
+                self.answer_caption.sizeHint().width(),
+            )
+            + self.own_values.horizontalSpacing()
+        )
+        own_compact = own_needed > available
+        if own_compact != self._own_compact:
+            self._own_compact = own_compact
+            for widget in (
+                self.own_time,
+                self.own_answers,
+                self.time_caption,
+                self.answer_caption,
+            ):
+                self.own_values.removeWidget(widget)
+            if own_compact:
+                self.own_values.addWidget(self.own_time, 0, 0)
+                self.own_values.addWidget(self.time_caption, 1, 0)
+                self.own_values.addWidget(self.own_answers, 2, 0)
+                self.own_values.addWidget(self.answer_caption, 3, 0)
+            else:
+                self.own_values.addWidget(self.own_time, 0, 0)
+                self.own_values.addWidget(self.own_answers, 0, 1)
+                self.own_values.addWidget(self.time_caption, 1, 0)
+                self.own_values.addWidget(self.answer_caption, 1, 1)
+
+        history_needed = (
+            self.yesterday.sizeHint().width()
+            + self.best.sizeHint().width()
+            + self.history_selector.horizontalSpacing()
+        )
+        history_compact = history_needed > available
+        if history_compact != self._history_compact:
+            self._history_compact = history_compact
+            self.history_selector.removeWidget(self.yesterday)
+            self.history_selector.removeWidget(self.best)
+            if history_compact:
+                self.history_selector.addWidget(self.yesterday, 0, 0)
+                self.history_selector.addWidget(self.best, 1, 0)
+            else:
+                self.history_selector.addWidget(self.yesterday, 0, 0)
+                self.history_selector.addWidget(self.best, 0, 1)
 
     def _request_collapsed(self, collapsed: bool) -> None:
         setter = getattr(self.controller, "set_panel_collapsed", None)
@@ -557,7 +683,9 @@ class StudyPanel(QWidget):
         my_id = (self.controller.online.get("auth") or {}).get("user_id")
 
         if group:
-            self.room_name.setText(str(group.get("name") or self.tr("스터디방", "Study room")))
+            room_name = str(group.get("name") or self.tr("스터디방", "Study room"))
+            self.room_name.setText(_allow_anywhere_wrap(room_name))
+            self.room_name.setToolTip(room_name)
             members_known = raw_members is not None
             members = [
                 member
@@ -583,6 +711,7 @@ class StudyPanel(QWidget):
                 self.room_presence.setText(self.tr("기록 확인 중", "Checking records"))
         else:
             self.room_name.setText(self.tr("스터디방", "Study room"))
+            self.room_name.setToolTip("")
             self.room_presence.setText(self.tr("아직 참여한 방이 없습니다", "Not in a room yet"))
             members_known = True
             members = []
@@ -655,3 +784,4 @@ class StudyPanel(QWidget):
             self.error_text.setText(self.tr("동기화 지연", "Sync delayed"))
             self.error_text.setToolTip(str(error))
             self.retry.setText(self.tr("재시도", "Retry"))
+        self._apply_responsive_layout()

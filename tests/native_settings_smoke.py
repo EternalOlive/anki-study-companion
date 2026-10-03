@@ -95,7 +95,55 @@ class FakeClient:
 
     def get_user(self, token):
         self.calls.append(("get_user", token))
-        return {"id": "user-local", "is_anonymous": False}
+        return {
+            "id": "user-local",
+            "is_anonymous": False,
+            "email": "reader@example.com",
+            "email_confirmed_at": "2026-10-03",
+        }
+
+    def verify_email_change(self, email, code):
+        self.calls.append(("verify_email_change", email, code))
+        return {
+            "access_token": "verified-token",
+            "refresh_token": "verified-refresh",
+            "user": {
+                "id": "user-local",
+                "is_anonymous": False,
+                "email": email,
+                "email_confirmed_at": "2026-10-03",
+            },
+        }
+
+    def bind_username(self, token, username, password):
+        self.calls.append(("bind_username", token, username, password))
+        return {
+            "access_token": "bound-token",
+            "refresh_token": "bound-refresh",
+            "username": username,
+            "recovery_code": "RECOVERY-ONE",
+            "user": {"id": "user-local"},
+        }
+
+    def sign_in_username(self, username, password):
+        self.calls.append(("sign_in_username", username, password))
+        return {
+            "access_token": "username-token",
+            "refresh_token": "username-refresh",
+            "username": username,
+            "recovery_code": "RECOVERY-PENDING",
+            "user": {"id": "signed-in-user"},
+        }
+
+    def recover_username(self, username, recovery_code, password):
+        self.calls.append(("recover_username", username, recovery_code, password))
+        return {
+            "access_token": "recovered-token",
+            "refresh_token": "recovered-refresh",
+            "username": username,
+            "recovery_code": "RECOVERY-TWO",
+            "user": {"id": "signed-in-user"},
+        }
 
     def sign_in(self, email, password):
         self.calls.append(("sign_in", email, password))
@@ -140,6 +188,7 @@ class FakeController:
         self.synced = []
         self.identity_attempts = 0
         self.cancelled_identity = 0
+        self.discarded_outboxes = []
         self.pending = None
 
     def _access_token(self):
@@ -159,6 +208,9 @@ class FakeController:
 
     def _cancel_identity_bootstrap(self):
         self.cancelled_identity += 1
+
+    def discard_room_outbox(self, user_id, group_id):
+        self.discarded_outboxes.append((user_id, group_id))
 
     def _store_session(self, result, email, display_name):
         user = result.get("user") or {}
@@ -345,6 +397,7 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert "group" not in controller.online
     assert dialog.pages.currentIndex() == dialog.PAGE_HOME
     assert controller.client.calls[-1] == ("leave_group", "token", "room-joined")
+    assert controller.discarded_outboxes == [("user-local", "room-joined")]
     assert _button(dialog, QtWidgets, "초대 코드로 참여").isVisible()
     dialog.close()
 
@@ -354,7 +407,7 @@ def check_account_states(app, SettingsDialog):
     guest_dialog = _fresh_dialog(SettingsDialog, guest)
     guest_dialog.show_account()
     app.processEvents()
-    assert "이메일 미연결" in guest_dialog.account_summary.text()
+    assert "로그인 아이디 없음" in guest_dialog.account_summary.text()
     assert guest_dialog.link_email_button.isVisible()
     assert guest_dialog.login_button.isVisible()
     guest_dialog.show_login()
@@ -371,9 +424,19 @@ def check_account_states(app, SettingsDialog):
     email_dialog.show_account()
     app.processEvents()
     assert "reader@example.com" in email_dialog.account_summary.text()
-    assert not email_dialog.link_email_button.isVisible()
-    assert not email_dialog.login_button.isVisible()
+    assert email_dialog.link_email_button.isVisible()
+    assert email_dialog.login_button.isVisible()
     email_dialog.close()
+
+    username = FakeController(account_kind="username", token=True)
+    username.online["username"] = "reader_7"
+    username_dialog = _fresh_dialog(SettingsDialog, username)
+    username_dialog.show_account()
+    app.processEvents()
+    assert "reader_7" in username_dialog.account_summary.text()
+    assert username_dialog.link_email_button.text() == "복구 코드 재발급"
+    assert username_dialog.login_button.isVisible()
+    username_dialog.close()
 
     expired = FakeController(account_kind="guest", token=False)
     expired_dialog = _fresh_dialog(SettingsDialog, expired)
@@ -443,27 +506,98 @@ def render_screenshots(app, QtGui, QtWidgets, SettingsDialog):
     return artifacts
 
 
-def check_email_confirmation(SettingsDialog, SupabaseError):
-    for user, allowed in (
-        ({"is_anonymous": True}, False),
-        ({"is_anonymous": False, "email": "reader@example.com"}, False),
-        ({"is_anonymous": False, "email": "other@example.com", "email_confirmed_at": "2026-10-03"}, False),
-        ({"is_anonymous": False, "email": "reader@example.com", "email_confirmed_at": "2026-10-03"}, True),
-    ):
-        controller = FakeController()
-        controller.online["pending_email"] = "reader@example.com"
-        controller.client.get_user = lambda token, value=user: value
-        dialog = _fresh_dialog(SettingsDialog, controller)
-        dialog.new_password.setText("test-password")
-        dialog.finish_email_link()
-        try:
-            controller.finish_remote()
-            assert allowed, "unconfirmed/wrong email was linked"
-            assert controller.online["account_kind"] == "email"
-        except SupabaseError:
-            assert not allowed
-            assert not any(call[0] == "update_user" for call in controller.client.calls)
-        dialog.close()
+def check_username_account_creation(SettingsDialog, SupabaseError):
+    controller = FakeController()
+    dialog = _fresh_dialog(SettingsDialog, controller)
+    dialog.show_email()
+    dialog.email_address.setText("  Reader_7 ")
+    dialog.new_password.setText("short")
+    dialog.finish_email_link()
+    assert controller.pending is None
+    assert "10자" in dialog.email_error.text()
+
+    dialog.new_password.setText("long-password")
+    dialog.finish_email_link()
+    controller.finish_remote()
+    assert controller.online["account_kind"] == "username"
+    assert controller.online["username"] == "reader_7"
+    assert controller.online["auth"]["user_id"] == "user-local"
+    assert controller.online["auth"]["access_token"] == "bound-token"
+    assert ("bind_username", "token", "reader_7", "long-password") in controller.client.calls
+    assert "RECOVERY-ONE" in dialog.recovery_result.text()
+    assert "recovery_code" not in controller.online
+    dialog.close()
+
+    replacing = FakeController(account_kind="username")
+    replacing.online["username"] = "reader_7"
+    replacing_dialog = _fresh_dialog(SettingsDialog, replacing)
+    replacing_dialog.show_email()
+    assert replacing_dialog.email_address.text() == "reader_7"
+    assert not replacing_dialog.email_address.isEnabled()
+    replacing_dialog.new_password.setText("long-password")
+    replacing_dialog.finish_email_link()
+    replacing.finish_remote()
+    assert "RECOVERY-ONE" in replacing_dialog.recovery_result.text()
+    replacing_dialog.close()
+
+    mismatch = FakeController()
+    mismatch.client.bind_username = lambda token, username, password: {
+        "access_token": "foreign-token",
+        "refresh_token": "foreign-refresh",
+        "username": username,
+        "recovery_code": "RECOVERY-X",
+        "user": {
+            "id": "different-user",
+        },
+    }
+    mismatch_dialog = _fresh_dialog(SettingsDialog, mismatch)
+    mismatch_dialog.email_address.setText("reader_7")
+    mismatch_dialog.new_password.setText("long-password")
+    mismatch_dialog.finish_email_link()
+    try:
+        mismatch.finish_remote()
+        raise AssertionError("a different account identity was accepted")
+    except SupabaseError as error:
+        assert "현재 계정과 다릅니다" in str(error)
+    assert mismatch.online["account_kind"] == "guest"
+    assert mismatch.online["auth"]["access_token"] == "token"
+    mismatch_dialog.close()
+
+
+def check_username_login_and_recovery(SettingsDialog):
+    controller = FakeController()
+    dialog = _fresh_dialog(SettingsDialog, controller)
+    dialog.show_recover()
+    dialog.recover_username.setText("reader_7")
+    dialog.recover_code.setText("RECOVERY-ONE")
+    dialog.recover_password.setText("new-password")
+    dialog.recover_account()
+    assert controller.pending is None
+    assert "계정 전환 안내" in dialog.recover_error.text()
+
+    dialog.show_login()
+    dialog.login_acknowledge.setChecked(True)
+    dialog.login_email.setText(" Reader_7 ")
+    dialog.login_password.setText("long-password")
+    dialog.sign_in()
+    controller.finish_remote()
+    assert controller.online["account_kind"] == "username"
+    assert controller.online["username"] == "reader_7"
+    assert controller.online["auth"]["access_token"] == "username-token"
+    assert ("sign_in_username", "reader_7", "long-password") in controller.client.calls
+    assert "RECOVERY-PENDING" in dialog.account_error.text()
+    assert "recovery_code" not in controller.online
+
+    dialog.show_recover()
+    dialog.recover_username.setText("Reader_7")
+    dialog.recover_code.setText("RECOVERY-ONE")
+    dialog.recover_password.setText("new-password")
+    dialog.recover_account()
+    controller.finish_remote()
+    assert controller.online["auth"]["access_token"] == "recovered-token"
+    assert "RECOVERY-TWO" in dialog.recover_error.text()
+    assert "recovery_code" not in controller.online
+    dialog.close()
 
 
 def main():
@@ -482,7 +616,8 @@ def main():
     check_home_draft_and_save(app, QtWidgets, SettingsDialog)
     check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
     check_account_states(app, SettingsDialog)
-    check_email_confirmation(SettingsDialog, SupabaseError)
+    check_username_account_creation(SettingsDialog, SupabaseError)
+    check_username_login_and_recovery(SettingsDialog)
     screenshots = render_screenshots(app, QtGui, QtWidgets, SettingsDialog)
     print("native settings smoke ok")
     for screenshot in screenshots:

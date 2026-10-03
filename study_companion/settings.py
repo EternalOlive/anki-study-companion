@@ -8,6 +8,7 @@ room and account actions run explicitly on their own pages.
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 
 from aqt import mw
 from aqt.qt import (
@@ -55,6 +56,7 @@ class SettingsDialog(QDialog):
     PAGE_EMAIL = 4
     PAGE_LOGIN = 5
     PAGE_LEAVE = 6
+    PAGE_RECOVER = 7
 
     def __init__(self, controller, parent=None):
         super().__init__(parent or mw)
@@ -83,6 +85,7 @@ class SettingsDialog(QDialog):
         self.email_page = self._build_email_page()
         self.login_page = self._build_login_page()
         self.leave_page = self._build_leave_page()
+        self.recover_page = self._build_recover_page()
         for page in (
             self.home_page,
             self.create_page,
@@ -91,6 +94,7 @@ class SettingsDialog(QDialog):
             self.email_page,
             self.login_page,
             self.leave_page,
+            self.recover_page,
         ):
             self.pages.addWidget(page)
 
@@ -325,10 +329,10 @@ class SettingsDialog(QDialog):
         self.account_error = self._error_label()
         layout.addWidget(self.account_error)
         self.link_email_button = QPushButton(
-            self._t("이메일 연결", "Link email"), page
+            self._t("통합 계정 만들기", "Create synced account"), page
         )
         self.login_button = QPushButton(
-            self._t("기존 계정 로그인", "Sign in to an existing account"), page
+            self._t("다른 PC의 계정으로 로그인", "Sign in on this PC"), page
         )
         self.link_email_button.clicked.connect(self.show_email)
         self.login_button.clicked.connect(self.show_login)
@@ -345,51 +349,36 @@ class SettingsDialog(QDialog):
 
     def _build_email_page(self):
         page, layout = self._detail_page(
-            self._t("이메일 연결", "Link an email")
+            self._t("통합 계정 만들기", "Create synced account")
         )
         layout.addWidget(
             self._note(
                 self._t(
-                    "이 PC의 기록은 유지됩니다. 다른 PC에서 같은 계정을 쓰려면 이메일을 연결하세요.",
-                    "Your records on this PC are kept. Link an email to use this account on another PC.",
+                    "현재 기록과 방을 그대로 유지하면서 로그인 아이디를 만듭니다.",
+                    "Create a login ID while keeping the current records and room.",
                 )
             )
         )
         form = QFormLayout()
         self.email_address = QLineEdit(page)
-        self.email_address.setObjectName("emailAddress")
-        form.addRow(self._t("이메일", "Email"), self.email_address)
-        layout.addLayout(form)
-        self.send_email_button = QPushButton(
-            self._t("확인 메일 보내기", "Send verification email"), page
-        )
-        self.send_email_button.clicked.connect(self.send_verification_email)
-        layout.addWidget(self.send_email_button)
-
-        self.password_area = QWidget(page)
-        password_layout = QVBoxLayout(self.password_area)
-        password_layout.setContentsMargins(0, 8, 0, 0)
-        password_layout.setSpacing(8)
-        password_layout.addWidget(
-            self._note(
-                self._t(
-                    "메일의 확인 링크를 연 뒤 비밀번호를 설정하세요.",
-                    "Open the verification link in your email, then set a password.",
-                )
-            )
-        )
-        password_form = QFormLayout()
-        self.new_password = QLineEdit(self.password_area)
+        self.email_address.setObjectName("accountUsername")
+        self.email_address.setMaxLength(24)
+        self.email_address.setPlaceholderText(self._t("영문 소문자·숫자·밑줄", "lowercase letters, digits, underscore"))
+        form.addRow(self._t("아이디", "Username"), self.email_address)
+        self.new_password = QLineEdit(page)
         self.new_password.setObjectName("newPassword")
         self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
-        password_form.addRow(self._t("비밀번호", "Password"), self.new_password)
-        password_layout.addLayout(password_form)
+        form.addRow(self._t("비밀번호", "Password"), self.new_password)
+        layout.addLayout(form)
         self.finish_email_button = QPushButton(
-            self._t("연결 완료", "Finish linking"), self.password_area
+            self._t("계정 만들기", "Create account"), page
         )
         self.finish_email_button.clicked.connect(self.finish_email_link)
-        password_layout.addWidget(self.finish_email_button)
-        layout.addWidget(self.password_area)
+        layout.addWidget(self.finish_email_button)
+        self.recovery_result = self._note("")
+        self.recovery_result.setTextFormat(Qt.TextFormat.PlainText)
+        self.recovery_result.setVisible(False)
+        layout.addWidget(self.recovery_result)
         self.email_error = self._error_label()
         layout.addWidget(self.email_error)
         layout.addStretch(1)
@@ -417,12 +406,18 @@ class SettingsDialog(QDialog):
         self.login_acknowledge.toggled.connect(self._update_login_enabled)
         layout.addWidget(self.login_acknowledge)
         form = QFormLayout()
+        self.email_login_compat = QCheckBox(
+            self._t("기존 이메일 계정", "Legacy email account"), page
+        )
+        self.email_login_compat.toggled.connect(self._update_login_mode)
+        layout.addWidget(self.email_login_compat)
         self.login_email = QLineEdit(page)
         self.login_email.setObjectName("loginEmail")
         self.login_password = QLineEdit(page)
         self.login_password.setObjectName("loginPassword")
         self.login_password.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow(self._t("이메일", "Email"), self.login_email)
+        self.login_identity_label = QLabel(self._t("아이디", "Username"), page)
+        form.addRow(self.login_identity_label, self.login_email)
         form.addRow(self._t("비밀번호", "Password"), self.login_password)
         layout.addLayout(form)
         self.login_error = self._error_label()
@@ -433,6 +428,45 @@ class SettingsDialog(QDialog):
         )
         self.login_back.clicked.disconnect()
         self.login_back.clicked.connect(self.show_account)
+        layout.addLayout(row)
+        recover = QPushButton(self._t("복구 코드로 비밀번호 재설정", "Reset with recovery code"), page)
+        recover.clicked.connect(self.show_recover)
+        layout.addWidget(recover)
+        return page
+
+    def _build_recover_page(self):
+        page, layout = self._detail_page(
+            self._t("계정 복구", "Recover account")
+        )
+        layout.addWidget(self._note(self._t(
+            "계정을 만들 때 표시된 복구 코드가 필요합니다.",
+            "Use the recovery code shown when the account was created.",
+        )))
+        form = QFormLayout()
+        self.recover_username = QLineEdit(page)
+        self.recover_code = QLineEdit(page)
+        self.recover_password = QLineEdit(page)
+        self.recover_password.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow(self._t("아이디", "Username"), self.recover_username)
+        form.addRow(self._t("복구 코드", "Recovery code"), self.recover_code)
+        form.addRow(self._t("새 비밀번호", "New password"), self.recover_password)
+        layout.addLayout(form)
+        self.recover_acknowledge = QCheckBox(
+            self._t(
+                "현재 익명 기록은 복구한 계정과 자동으로 합쳐지지 않음을 확인했습니다.",
+                "I understand the current anonymous records will not be merged automatically.",
+            ),
+            page,
+        )
+        layout.addWidget(self.recover_acknowledge)
+        self.recover_error = self._error_label()
+        layout.addWidget(self.recover_error)
+        layout.addStretch(1)
+        row, self.recover_back, self.recover_submit = self._back_row(
+            page, self._t("재설정", "Reset"), self.recover_account
+        )
+        self.recover_back.clicked.disconnect()
+        self.recover_back.clicked.connect(self.show_login)
         layout.addLayout(row)
         return page
 
@@ -452,10 +486,6 @@ class SettingsDialog(QDialog):
         if signature != self._controller_signature:
             self._refresh_room_section()
             self._refresh_account_page()
-        pending = self.controller.online.get("pending_email", "")
-        if pending and not self.email_address.text():
-            self.email_address.setText(pending)
-        self.password_area.setVisible(bool(pending))
         self._controller_signature = signature
 
     def _current_controller_signature(self):
@@ -469,6 +499,7 @@ class SettingsDialog(QDialog):
             online.get("display_name"),
             online.get("account_kind"),
             online.get("email"),
+            online.get("username"),
             online.get("pending_email"),
             online.get("last_error"),
         )
@@ -485,7 +516,6 @@ class SettingsDialog(QDialog):
         self.account_code.setText(self._display_code())
         self._refresh_room_section()
         self._refresh_account_page()
-        self.password_area.setVisible(bool(self.controller.online.get("pending_email")))
         self._controller_signature = signature
 
     def _refresh_room_section(self):
@@ -552,22 +582,35 @@ class SettingsDialog(QDialog):
     def _refresh_account_page(self):
         kind = self.controller.online.get("account_kind")
         email = self.controller.online.get("email")
+        username = self.controller.online.get("username")
         token = self.controller._access_token()
-        if kind == "email" and email:
+        if kind == "username" and username:
+            self.account_summary.setText(
+                self._t(f"통합 계정\n{username}", f"Synced account\n{username}")
+            )
+            self.link_email_button.setText(self._t("복구 코드 재발급", "Replace recovery code"))
+            self.link_email_button.setVisible(bool(token))
+            self.login_button.setText(self._t("다른 계정으로 전환", "Switch account"))
+            self.login_button.setVisible(True)
+        elif kind == "email" and email:
             self.account_summary.setText(
                 self._t(f"연결된 이메일\n{email}", f"Linked email\n{email}")
             )
-            self.link_email_button.setVisible(False)
-            self.login_button.setVisible(False)
+            self.link_email_button.setText(self._t("통합 계정 만들기", "Create synced account"))
+            self.link_email_button.setVisible(bool(token))
+            self.login_button.setText(self._t("다른 계정으로 전환", "Switch account"))
+            self.login_button.setVisible(True)
         elif token:
             self.account_summary.setText(
                 self._t(
-                    "이메일 미연결\n현재 기록은 이 PC에 보존됩니다.",
-                    "Email not linked\nYour current records are kept on this PC.",
+                    "로그인 아이디 없음\n현재 기록은 이 PC에 보존됩니다.",
+                    "No login ID\nYour current records are kept on this PC.",
                 )
             )
             self.link_email_button.setVisible(True)
+            self.link_email_button.setText(self._t("통합 계정 만들기", "Create synced account"))
             self.login_button.setVisible(True)
+            self.login_button.setText(self._t("다른 PC의 계정으로 로그인", "Sign in on this PC"))
         else:
             self.account_summary.setText(
                 self._t(
@@ -612,6 +655,20 @@ class SettingsDialog(QDialog):
     def show_email(self):
         self._set_message(self.email_error, "")
         self.refresh_from_controller()
+        replacing = self.controller.online.get("account_kind") == "username"
+        self.recovery_result.setVisible(False)
+        self.finish_email_button.setVisible(True)
+        self.email_address.setText(
+            str(self.controller.online.get("username") or "") if replacing else ""
+        )
+        self.email_address.setEnabled(not replacing)
+        self.new_password.setEnabled(True)
+        self.new_password.clear()
+        self.finish_email_button.setText(
+            self._t("복구 코드 재발급", "Replace recovery code")
+            if replacing
+            else self._t("계정 만들기", "Create account")
+        )
         self.pages.setCurrentIndex(self.PAGE_EMAIL)
         self.email_address.setFocus()
 
@@ -636,9 +693,51 @@ class SettingsDialog(QDialog):
         self.login_acknowledge.setChecked(False)
         self.login_email.setEnabled(True)
         self.login_password.setEnabled(True)
+        self.email_login_compat.setChecked(False)
         self._update_login_enabled()
         self.pages.setCurrentIndex(self.PAGE_LOGIN)
         self.login_email.setFocus()
+
+    def show_recover(self):
+        self._set_message(self.recover_error, "")
+        active_guest = (
+            self.controller.online.get("account_kind") == "guest"
+            and bool(self.controller._access_token())
+        )
+        self.recover_acknowledge.setVisible(active_guest)
+        self.recover_acknowledge.setChecked(False)
+        self.pages.setCurrentIndex(self.PAGE_RECOVER)
+        self.recover_username.setFocus()
+
+    def _update_login_mode(self, checked):
+        self.login_identity_label.setText(
+            self._t("이메일", "Email") if checked else self._t("아이디", "Username")
+        )
+
+    @staticmethod
+    def _normalized_username(value):
+        return str(value or "").strip().lower()
+
+    def _username_error(self, username):
+        if not re.fullmatch(r"[a-z0-9_]{4,24}", username):
+            return self._t(
+                "아이디는 영문 소문자·숫자·밑줄 4~24자로 입력해 주세요.",
+                "Use 4–24 lowercase letters, digits, or underscores.",
+            )
+        return ""
+
+    def _password_error(self, password):
+        if len(password) < 10:
+            return self._t(
+                "비밀번호는 10자 이상으로 입력해 주세요.",
+                "Use at least 10 characters for the password.",
+            )
+        if len(password.encode("utf-8")) > 72:
+            return self._t(
+                "비밀번호는 UTF-8 기준 72바이트 이하여야 합니다.",
+                "The password must be at most 72 UTF-8 bytes.",
+            )
+        return ""
 
     def _update_login_enabled(self, *_args):
         active_guest = (
@@ -849,6 +948,9 @@ class SettingsDialog(QDialog):
             self._finish_remote()
             current = self.controller.online.get("group") or {}
             if current.get("id") == group_id:
+                user_id = (self.controller.online.get("auth") or {}).get("user_id")
+                if user_id and hasattr(self.controller, "discard_room_outbox"):
+                    self.controller.discard_room_outbox(user_id, group_id)
                 self.controller.online.pop("group", None)
                 self.controller.online.pop("members", None)
             self.controller.save()
@@ -868,91 +970,87 @@ class SettingsDialog(QDialog):
         )
 
     def send_verification_email(self):
-        address = self.email_address.text().strip()
-        if "@" not in address or address.startswith("@") or address.endswith("@"):
-            self._set_message(
-                self.email_error,
-                self._t("올바른 이메일을 입력해 주세요.", "Enter a valid email address."),
-            )
-            return
-        if not self._begin_remote(self.email_error):
-            return
-
-        def success(_result):
-            self._finish_remote()
-            self.controller.online["pending_email"] = address
-            self.controller.save()
-            if self._valid():
-                self.password_area.setVisible(True)
-                self._set_message(
-                    self.email_error,
-                    self._t(
-                        "서버가 인증 메일 요청을 접수했습니다. 받은 메일의 링크를 연 뒤 비밀번호를 설정하세요. 메일이 없으면 스팸함과 발송 설정을 확인해 주세요.",
-                        "The server accepted the email request. Open the link in your inbox, then set a password. If it does not arrive, check spam and email delivery settings.",
-                    ),
-                )
-                self.new_password.setFocus()
-
-        self.controller._run_authenticated_action(
-            [self.send_email_button],
-            lambda token: self.controller.client.update_user(token, email=address),
-            success,
-            self._t("이메일을 연결하지 못했습니다.", "Could not link the email."),
-            on_error=self._remote_error(
-                self.email_error,
-                self._t("이메일을 연결하지 못했습니다.", "Could not link the email."),
-            ),
-        )
+        self.finish_email_link()
 
     def finish_email_link(self):
+        username = self._normalized_username(self.email_address.text())
+        self.email_address.setText(username)
         password = self.new_password.text()
-        pending_address = self.controller.online.get(
-            "pending_email", self.email_address.text().strip()
-        )
-        if len(password) < 6:
-            self._set_message(
-                self.email_error,
-                self._t(
-                    "비밀번호는 6자 이상으로 입력해 주세요.",
-                    "Use at least 6 characters for the password.",
-                ),
-            )
+        validation_error = self._username_error(username) or self._password_error(password)
+        if validation_error:
+            self._set_message(self.email_error, validation_error)
             return
         if not self._begin_remote(self.email_error):
             return
 
         def operation(token):
-            user = self.controller.client.get_user(token)
-            if (user.get("is_anonymous", True)
-                    or not user.get("email_confirmed_at")
-                    or (user.get("email") or "").casefold() != pending_address.casefold()):
+            current_user_id = (self.controller.online.get("auth") or {}).get(
+                "user_id"
+            )
+            if not current_user_id:
                 raise SupabaseError(
                     self._t(
-                        "먼저 이메일의 확인 링크를 열어 주세요.",
-                        "Open the verification link in your email first.",
+                        "현재 계정을 확인할 수 없습니다. Anki를 다시 시작한 뒤 시도해 주세요.",
+                        "The current account could not be verified. Restart Anki and try again.",
                     )
                 )
-            self.controller.client.update_user(token, password=password)
-            return user
+            session = self.controller.client.bind_username(token, username, password)
+            user = session.get("user") or {}
+            verified_user_id = user.get("id")
+            if verified_user_id != current_user_id:
+                raise SupabaseError(
+                    self._t(
+                        "인증된 계정이 현재 계정과 다릅니다. 연결을 중단했습니다.",
+                        "The verified account is different from the current account. Linking was stopped.",
+                    )
+                )
+            if session.get("username") != username:
+                raise SupabaseError(
+                    self._t(
+                        "서버에서 다른 아이디를 반환해 연결을 중단했습니다.",
+                        "The server returned a different username. Linking was stopped.",
+                    )
+                )
+            if not session.get("access_token") or not session.get("recovery_code"):
+                raise SupabaseError(
+                    self._t(
+                        "계정 또는 복구 코드 정보를 받지 못했습니다.",
+                        "The account or recovery code was not returned.",
+                    )
+                )
+            return session
 
-        def success(_user):
+        def success(session):
             self._finish_remote()
-            self.controller.online["account_kind"] = "email"
-            self.controller.online["email"] = self.controller.online.pop(
-                "pending_email", pending_address
+            user = session.get("user") or {}
+            display_name = self.controller.online.get("display_name") or canonical_nickname(
+                user["id"]
             )
+            self.controller._store_session(session, "", display_name)
+            self.controller.online["account_kind"] = "username"
+            self.controller.online["username"] = username
+            self.controller.online.pop("email", None)
+            self.controller.online.pop("pending_email", None)
             self.controller.save()
+            self.controller.sync_async(force=True)
             if self._valid():
                 self.new_password.clear()
-                self.show_account()
+                self.email_address.setEnabled(False)
+                self.new_password.setEnabled(False)
+                self.finish_email_button.setVisible(False)
+                self.recovery_result.setText(self._t(
+                    f"복구 코드\n{session['recovery_code']}\n\n이 코드는 다시 표시되지 않습니다. 지금 안전한 곳에 보관하세요.",
+                    f"Recovery code\n{session['recovery_code']}\n\nThis code will not be shown again. Store it safely now.",
+                ))
+                self.recovery_result.setVisible(True)
 
         self.controller._run_authenticated_action(
             [self.finish_email_button],
             operation,
             success,
             self._t(
-                "계정 연결을 마치지 못했습니다.",
-                "Could not finish linking the account.",
+                "통합 계정을 만들지 못했습니다.",
+                "Could not create the synced account.",
             ),
             on_error=self._remote_error(
                 self.email_error,
@@ -977,23 +1075,36 @@ class SettingsDialog(QDialog):
                 ),
             )
             return
+        legacy_email = self.email_login_compat.isChecked()
         address = self.login_email.text().strip()
+        if not legacy_email:
+            address = self._normalized_username(address)
+            self.login_email.setText(address)
         password = self.login_password.text()
         if not address or not password:
             self._set_message(
                 self.login_error,
-                self._t(
-                    "이메일과 비밀번호를 입력해 주세요.",
-                    "Enter your email and password.",
-                ),
+                self._t("이메일과 비밀번호를 입력해 주세요.", "Enter your email and password.")
+                if legacy_email
+                else self._t("아이디와 비밀번호를 입력해 주세요.", "Enter your username and password."),
             )
+            return
+        validation_error = "" if legacy_email else (
+            self._username_error(address) or self._password_error(password)
+        )
+        if validation_error:
+            self._set_message(self.login_error, validation_error)
             return
         if not self._begin_remote(self.login_error):
             return
         self.controller._cancel_identity_bootstrap()
 
         def task():
-            result = self.controller.client.sign_in(address, password)
+            result = (
+                self.controller.client.sign_in(address, password)
+                if legacy_email
+                else self.controller.client.sign_in_username(address, password)
+            )
             user = result.get("user") or {}
             user_id = user.get("id") or result.get("user_id")
             if not user_id:
@@ -1003,6 +1114,11 @@ class SettingsDialog(QDialog):
                         "The sign-in response did not include a user.",
                     )
                 )
+            if not legacy_email and result.get("username") != address:
+                raise SupabaseError(self._t(
+                    "로그인 응답의 아이디가 일치하지 않습니다.",
+                    "The username in the sign-in response did not match.",
+                ))
             name = canonical_nickname(user_id)
             self.controller.client.upsert_profile(
                 result["access_token"], user_id, name
@@ -1022,6 +1138,7 @@ class SettingsDialog(QDialog):
                         "guest_id",
                         "display_name",
                         "account_kind",
+                        "username",
                         "email",
                         "pending_email",
                         "group",
@@ -1031,8 +1148,13 @@ class SettingsDialog(QDialog):
                 }
             self.controller.online.pop("group", None)
             self.controller.online.pop("members", None)
-            self.controller._store_session(result, address, name)
-            self.controller.online["account_kind"] = "email"
+            self.controller._store_session(result, address if legacy_email else "", name)
+            self.controller.online["account_kind"] = "email" if legacy_email else "username"
+            if legacy_email:
+                self.controller.online.pop("username", None)
+            else:
+                self.controller.online["username"] = address
+                self.controller.online.pop("email", None)
             self.controller.online.pop("pending_email", None)
             if groups:
                 self.controller.online["group"] = groups[0]
@@ -1041,7 +1163,15 @@ class SettingsDialog(QDialog):
             if self._valid():
                 self.login_password.clear()
                 self._reset_draft()
-                self.show_home()
+                recovery_code = result.get("recovery_code")
+                if recovery_code:
+                    self.show_account()
+                    self._set_message(self.account_error, self._t(
+                        f"계정 연결 완료\n복구 코드: {recovery_code}\n이 코드는 다시 표시되지 않습니다. 지금 안전한 곳에 보관하세요.",
+                        f"Account connected\nRecovery code: {recovery_code}\nThis code will not be shown again. Store it safely now.",
+                    ))
+                else:
+                    self.show_home()
 
         self.controller._run_online_action(
             [self.login_submit],
@@ -1051,5 +1181,114 @@ class SettingsDialog(QDialog):
             on_error=self._remote_error(
                 self.login_error,
                 self._t("로그인하지 못했습니다.", "Could not sign in."),
+            ),
+        )
+
+    def recover_account(self):
+        active_guest = (
+            self.controller.online.get("account_kind") == "guest"
+            and bool(self.controller._access_token())
+        )
+        if active_guest and not self.recover_acknowledge.isChecked():
+            self._set_message(
+                self.recover_error,
+                self._t(
+                    "계정 전환 안내를 확인해 주세요.",
+                    "Confirm the account-switching notice first.",
+                ),
+            )
+            return
+        username = self._normalized_username(self.recover_username.text())
+        self.recover_username.setText(username)
+        recovery_code = self.recover_code.text().strip()
+        password = self.recover_password.text()
+        validation_error = self._username_error(username) or self._password_error(password)
+        if validation_error:
+            self._set_message(self.recover_error, validation_error)
+            return
+        if not recovery_code:
+            self._set_message(
+                self.recover_error,
+                self._t("복구 코드를 입력해 주세요.", "Enter the recovery code."),
+            )
+            return
+        if not self._begin_remote(self.recover_error):
+            return
+        self.controller._cancel_identity_bootstrap()
+
+        def task():
+            session = self.controller.client.recover_username(
+                username, recovery_code, password
+            )
+            user = session.get("user") or {}
+            user_id = user.get("id") or session.get("user_id")
+            new_code = session.get("recovery_code")
+            if not user_id or not session.get("access_token") or not new_code:
+                raise SupabaseError(self._t(
+                    "복구 응답이 완전하지 않습니다.",
+                    "The recovery response is incomplete.",
+                ))
+            if session.get("username") != username:
+                raise SupabaseError(self._t(
+                    "복구 응답의 아이디가 일치하지 않습니다.",
+                    "The username in the recovery response did not match.",
+                ))
+            name = canonical_nickname(user_id)
+            self.controller.client.upsert_profile(
+                session["access_token"], user_id, name
+            )
+            groups = self.controller.client.list_groups(session["access_token"], user_id)
+            return session, groups, name
+
+        def success(value):
+            self._finish_remote()
+            session, groups, name = value
+            if (
+                self.controller.online.get("account_kind") == "guest"
+                and self.controller._access_token()
+            ):
+                previous = self.controller.online
+                self.controller.online["guest_session_backup"] = {
+                    key: deepcopy(previous[key])
+                    for key in (
+                        "auth",
+                        "guest_id",
+                        "display_name",
+                        "account_kind",
+                        "username",
+                        "email",
+                        "pending_email",
+                        "group",
+                        "members",
+                    )
+                    if key in previous
+                }
+            self.controller.online.pop("group", None)
+            self.controller.online.pop("members", None)
+            self.controller._store_session(session, "", name)
+            self.controller.online["account_kind"] = "username"
+            self.controller.online["username"] = username
+            self.controller.online.pop("email", None)
+            self.controller.online.pop("pending_email", None)
+            if groups:
+                self.controller.online["group"] = groups[0]
+            self.controller.save()
+            self.controller.sync_async(force=True)
+            if self._valid():
+                self.recover_code.clear()
+                self.recover_password.clear()
+                self._set_message(self.recover_error, self._t(
+                    f"복구 완료\n새 복구 코드: {session['recovery_code']}\n이 코드를 지금 안전한 곳에 보관하세요.",
+                    f"Recovered\nNew recovery code: {session['recovery_code']}\nStore this code safely now.",
+                ))
+
+        self.controller._run_online_action(
+            [self.recover_back, self.recover_submit],
+            task,
+            success,
+            self._t("계정을 복구하지 못했습니다.", "Could not recover the account."),
+            on_error=self._remote_error(
+                self.recover_error,
+                self._t("계정을 복구하지 못했습니다.", "Could not recover the account."),
             ),
         )

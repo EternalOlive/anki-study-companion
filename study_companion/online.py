@@ -214,6 +214,38 @@ class SupabaseClient:
             body={"email": email, "password": password},
         )
 
+    def bind_username(self, token: str, username: str, password: str) -> dict[str, Any]:
+        return self._account_request(
+            "bind", token=token, username=username, password=password
+        )
+
+    def sign_in_username(self, username: str, password: str) -> dict[str, Any]:
+        return self._account_request("login", username=username, password=password)
+
+    def recover_username(
+        self, username: str, recovery_code: str, new_password: str
+    ) -> dict[str, Any]:
+        return self._account_request(
+            "recover", username=username, recovery_code=recovery_code,
+            password=new_password,
+        )
+
+    def _account_request(self, action: str, *, token: str | None = None, **fields: Any) -> dict[str, Any]:
+        fields["username"] = str(fields.get("username", "")).strip().lower()
+        result = self._request(
+            "POST", "/functions/v1/account-auth", token=token or self.key,
+            body={"action": action, **fields},
+        )
+        if (
+            not isinstance(result, dict)
+            or not result.get("access_token")
+            or not result.get("refresh_token")
+            or not isinstance(result.get("user"), dict)
+            or not result["user"].get("id")
+        ):
+            raise SupabaseError("로그인 서버의 응답을 확인할 수 없습니다 / Invalid login response")
+        return result
+
     def refresh(self, refresh_token: str) -> dict[str, Any]:
         return self._request(
             "POST",
