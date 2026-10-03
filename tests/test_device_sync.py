@@ -6,6 +6,7 @@ from pathlib import Path
 from study_companion.online import (
     DeviceSyncLedger,
     SupabaseClient,
+    SupabaseError,
     load_or_create_device_id,
     profile_device_id,
 )
@@ -141,6 +142,14 @@ class DeviceSyncLedgerTests(unittest.TestCase):
 
 
 class DeviceSyncRequestTests(unittest.TestCase):
+    def test_server_ahead_response_is_not_a_successful_save(self):
+        client = SupabaseClient(opener=FakeOpener([{"revision": 90}]))
+        with self.assertRaises(SupabaseError):
+            client.record_device_day(
+                "token", group_id="g1", device_id="d1", study_day="2026-10-03",
+                revision=1, active_seconds=10, answer_count=1, status="paused",
+            )
+
     def test_device_request_includes_goals(self):
         opener = FakeOpener([{"revision": 3}])
         client = SupabaseClient(opener=opener)

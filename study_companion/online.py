@@ -346,6 +346,12 @@ class SupabaseClient:
         stored = self._first(result)
         if not isinstance(stored, dict) or not stored:
             raise SupabaseError("기기별 기록 저장 결과를 확인할 수 없습니다")
+        if stored.get("revision") != revision:
+            raise SupabaseError(
+                "로컬 동기화 상태와 서버 기록이 일치하지 않습니다. "
+                "이전 파일을 복원했다면 새 기록이 저장되었다고 간주하지 마세요. "
+                "기기 동기화 상태 복구가 필요합니다."
+            )
         return stored
 
     def fetch_group_today(
