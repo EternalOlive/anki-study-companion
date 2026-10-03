@@ -165,9 +165,9 @@ class SettingsDialog(QDialog):
         sharing_layout.addWidget(
             self._note(
                 self._t(
-                    "방 멤버는 공부 시간·답변 수·공부 중 상태를 볼 수 있습니다. "
+                    "방 멤버는 공부 시간·답변 수·오늘 답변 시간대·공부 중 상태를 볼 수 있습니다. "
                     "방의 하루는 한국 시간(UTC+9) 자정에 바뀝니다.",
-                    "Room members can see your study time, answer count, and studying status. "
+                    "Room members can see your study time, answer count, today's answer activity, and studying status. "
                     "The room day resets at Korean midnight (UTC+9).",
                 )
             )
@@ -327,10 +327,10 @@ class SettingsDialog(QDialog):
     def _room_participation_notice(self, parent):
         label = QLabel(
             self._t(
-                "방에 참여하면 공부 시간·답변 수·공부 중 상태가 멤버에게 공유됩니다. "
+                "방에 참여하면 공부 시간·답변 수·오늘 답변 시간대·공부 중 상태가 멤버에게 공유됩니다. "
                 "선택한 경우에만 덱 이름도 공유하며, 카드 내용은 공유하지 않습니다. "
                 "방의 하루는 한국 시간(UTC+9) 자정에 바뀝니다.",
-                "Creating or joining a room shares your study time, answer count, and studying status "
+                "Creating or joining a room shares your study time, answer count, today's answer activity, and studying status "
                 "with its members. Your deck name is shared only when enabled; card contents are not shared. "
                 "The room day resets at Korean midnight (UTC+9).",
             ),

@@ -81,6 +81,214 @@ class PanelToggleButton(QToolButton):
         painter.drawLine(end, 16, start, 21)
 
 
+class ActivityTimeline(QWidget):
+    """A compact, accessible view of recorded answers across one day."""
+
+    def __init__(self, panel: "StudyPanel", parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self.known = False
+        self.error = False
+        self.buckets: dict[int, dict] = {}
+        self.setMinimumHeight(45)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+
+    def update_activity(self, member: dict) -> None:
+        study_day = member.get("study_day")
+        matches_today = study_day is None or str(study_day) == _now().date().isoformat()
+        self.known = member.get("activity_known") is True and matches_today
+        self.error = bool(member.get("activity_error")) and matches_today
+        self.setMinimumHeight(max(45, self.fontMetrics().height() * 3))
+        self.buckets = {}
+        if self.known:
+            for bucket in member.get("activity_buckets") or []:
+                try:
+                    slot = int(bucket.get("slot"))
+                    answers = max(0, int(bucket.get("answer_count") or 0))
+                    time_ms = max(0, int(bucket.get("time_ms") or 0))
+                except (AttributeError, TypeError, ValueError):
+                    continue
+                if 0 <= slot < 96 and (answers or time_ms):
+                    self.buckets[slot] = {
+                        "answer_count": answers,
+                        "time_ms": time_ms,
+                    }
+        descriptions = [self._description(slot) for slot in sorted(self.buckets)]
+        if self.error:
+            summary = self.panel.tr("시간대 동기화 지연", "Activity sync delayed")
+        elif not self.known:
+            summary = self.panel.tr("시간대 기록 없음", "Timeline unavailable")
+        elif not descriptions:
+            summary = self.panel.tr("오늘 답변 기록 없음", "No answers recorded today")
+        else:
+            summary = self.panel.tr("오늘 활동: ", "Today's activity: ") + "; ".join(descriptions)
+        summary += self.panel.tr(" · 한국 시간(UTC+9)", " · UTC+9")
+        self.setAccessibleName(summary)
+        self.setToolTip(summary)
+        self.update()
+
+    def _description(self, slot: int) -> str:
+        bucket = self.buckets[slot]
+        start_minutes = slot * 15
+        end_minutes = start_minutes + 15
+        start = f"{start_minutes // 60:02d}:{start_minutes % 60:02d}"
+        end = "24:00" if end_minutes == 1440 else f"{end_minutes // 60:02d}:{end_minutes % 60:02d}"
+        answers = bucket["answer_count"]
+        duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
+        return self.panel.tr(
+            f"{start}–{end} (UTC+9) · {answers}회 · 기록 시간 {duration}",
+            f"{start}–{end} (UTC+9) · {answers} answers · recorded time {duration}",
+        )
+
+    def _slot_at(self, x: int) -> int | None:
+        left, right = 1, max(2, self.width() - 1)
+        if x < left or x >= right:
+            return None
+        return min(95, max(0, int((x - left) * 96 / max(1, right - left))))
+
+    def mouseMoveEvent(self, event) -> None:
+        slot = self._slot_at(int(event.position().x()))
+        if slot in self.buckets:
+            self.setToolTip(self._description(slot))
+        else:
+            self.setToolTip(self.accessibleName())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.setToolTip(self.accessibleName())
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        foreground = self.palette().color(QPalette.ColorRole.WindowText)
+        muted = self.palette().color(QPalette.ColorRole.WindowText)
+        muted.setAlpha(170)
+        font = painter.font()
+        font.setPointSizeF(max(7.0, font.pointSizeF() * 0.72))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        label_y = max(metrics.ascent() + 2, self.height() - 4)
+        baseline_y = max(15, label_y - metrics.height() - 4)
+        bar_top = max(3, baseline_y - 12)
+        if self.known and not self.error and self.buckets:
+            painter.setPen(QPen(muted, 1))
+            painter.drawLine(1, baseline_y, max(1, self.width() - 2), baseline_y)
+            width = max(1, self.width() - 2)
+            for slot in self.buckets:
+                x1 = 1 + round(slot * width / 96)
+                x2 = 1 + round((slot + 1) * width / 96)
+                painter.fillRect(x1, bar_top, max(1, x2 - x1), baseline_y - bar_top, foreground)
+
+        if self.error or not self.known or not self.buckets:
+            empty = self.panel.tr(
+                "시간대 동기화 지연" if self.error else "오늘 답변 기록 없음" if self.known else "시간대 기록 없음",
+                "Activity sync delayed" if self.error else "No answers recorded today" if self.known else "Timeline unavailable",
+            )
+            painter.setPen(foreground)
+            painter.drawText(
+                self.rect().adjusted(1, 1, -1, -(self.height() - baseline_y + 1)),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                empty,
+            )
+        painter.setPen(muted)
+        labels = ((0, "00"), (24, "06"), (48, "12"), (72, "18"), (96, "24"))
+        width = max(1, self.width() - 2)
+        for slot, label in labels:
+            x = 1 + round(slot * width / 96)
+            if slot == 96:
+                x -= metrics.horizontalAdvance(label)
+            elif slot:
+                x -= metrics.horizontalAdvance(label) // 2
+            painter.drawText(x, label_y, label)
+
+        if self.hasFocus():
+            focus = self.palette().color(QPalette.ColorRole.Highlight)
+            painter.setPen(QPen(focus, 1))
+            painter.drawRect(0, 0, max(0, self.width() - 1), max(0, self.height() - 1))
+
+
+class WeeklyDayButton(QToolButton):
+    """One keyboard-focusable answer bar in the recent-seven-day view."""
+
+    def __init__(self, panel: "StudyPanel", parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self.day = ""
+        self.answers = 0
+        self.seconds = 0
+        self.maximum = 1
+        self.today = False
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(20)
+        self.setFixedHeight(72)
+        self.setAutoRaise(True)
+        self.clicked.connect(lambda: self.panel.show_weekly_day(self))
+
+    def set_day(self, day: dict, maximum: int, today: str) -> None:
+        self.day = str(day.get("day") or "")
+        self.answers = max(0, int(day.get("answers") or 0))
+        self.seconds = max(0, int(day.get("seconds") or 0))
+        self.maximum = max(1, int(maximum))
+        self.today = self.day == today
+        self.setFixedHeight(max(72, self.fontMetrics().height() * 4))
+        try:
+            date_label = datetime.fromisoformat(self.day).strftime("%m/%d")
+        except ValueError:
+            date_label = self.day or "—"
+        description = self.panel.tr(
+            f"{date_label} · 답변 {self.answers}회 · 공부 시간 {self.panel.format_clock(self.seconds)}",
+            f"{date_label} · {self.answers} answers · study time {self.panel.format_clock(self.seconds)}",
+        )
+        if self.today:
+            description += self.panel.tr(" · 오늘 진행 중", " · today in progress")
+        self.setAccessibleName(description)
+        self.setToolTip(description)
+        self.update()
+
+    def focusInEvent(self, event) -> None:
+        super().focusInEvent(event)
+        self.panel.show_weekly_day(self)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        foreground = self.palette().color(QPalette.ColorRole.WindowText)
+        muted = self.palette().color(QPalette.ColorRole.WindowText)
+        muted.setAlpha(170)
+        font = painter.font()
+        font.setPointSizeF(max(6.5, font.pointSizeF() * 0.68))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        label_top = max(16, self.height() - metrics.height() - 3)
+        bar_bottom = max(12, label_top - 4)
+        available_bar_height = max(6, bar_bottom - 7)
+        bar_height = round(available_bar_height * self.answers / self.maximum) if self.answers else 1
+        bar_width = max(4, min(14, self.width() - 8))
+        bar_x = (self.width() - bar_width) // 2
+        color = foreground if self.answers else muted
+        painter.fillRect(bar_x, bar_bottom - bar_height, bar_width, bar_height, color)
+
+        painter.setPen(muted)
+        try:
+            label = datetime.fromisoformat(self.day).strftime("%m/%d")
+        except ValueError:
+            label = "—"
+        painter.drawText(
+            self.rect().adjusted(0, label_top, 0, 0),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+            label,
+        )
+
+        if self.today or self.hasFocus():
+            border = self.palette().color(
+                QPalette.ColorRole.Highlight if self.hasFocus() else QPalette.ColorRole.Mid
+            )
+            painter.setPen(QPen(border, 2 if self.hasFocus() else 1))
+            painter.drawRoundedRect(1, 1, max(0, self.width() - 3), max(0, self.height() - 3), 3, 3)
+
+
 class MemberRow(QWidget):
     """A stable, expandable friend row.
 
@@ -151,12 +359,18 @@ class MemberRow(QWidget):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.identity)
 
-        self.details = QLabel(self)
+        self.detail_body = QWidget(self)
+        detail_layout = QVBoxLayout(self.detail_body)
+        detail_layout.setContentsMargins(18, 0, 0, 2)
+        detail_layout.setSpacing(4)
+        self.details = QLabel(self.detail_body)
         self.details.setTextFormat(Qt.TextFormat.PlainText)
         self.details.setWordWrap(True)
-        self.details.setContentsMargins(18, 0, 0, 2)
-        self.details.hide()
-        layout.addWidget(self.details)
+        detail_layout.addWidget(self.details)
+        self.activity_timeline = ActivityTimeline(panel, self.detail_body)
+        detail_layout.addWidget(self.activity_timeline)
+        self.detail_body.hide()
+        layout.addWidget(self.detail_body)
 
         self._compact = False
         self.update_member(member)
@@ -192,11 +406,9 @@ class MemberRow(QWidget):
             self.summary.addWidget(self.answers, 0, 3)
 
     def toggle_expanded(self) -> None:
-        if not self.details.text():
-            return
         self.expanded = not self.expanded
         self.identity.setChecked(self.expanded)
-        self.details.setVisible(self.expanded)
+        self.detail_body.setVisible(self.expanded)
 
     def update_member(self, member: dict) -> None:
         self.member = member
@@ -245,19 +457,21 @@ class MemberRow(QWidget):
         if goals:
             lines.append(self.panel.tr("목표 ", "Goal ") + " · ".join(goals))
         self.details.setText("\n".join(lines))
-        expandable = bool(lines)
+        self.details.setVisible(bool(lines))
+        self.activity_timeline.update_activity(member)
+        expandable = True
         changed = self.identity.property("expandable") != expandable
         self.identity.setProperty("expandable", expandable)
         self.identity.setCheckable(expandable)
         self.identity.setFocusPolicy(Qt.FocusPolicy.StrongFocus if expandable else Qt.FocusPolicy.NoFocus)
         self.identity.setCursor(Qt.CursorShape.PointingHandCursor if expandable else Qt.CursorShape.ArrowCursor)
         self.identity.setAccessibleName(f"{name}, {status_text}" + (
-            self.panel.tr(". 덱과 목표 보기", ". Show deck and goals") if expandable else ""
+            self.panel.tr(". 오늘 활동 보기", ". Show today's activity") if expandable else ""
         ))
         if not expandable:
             self.expanded = False
         self.identity.setChecked(self.expanded)
-        self.details.setVisible(self.expanded)
+        self.detail_body.setVisible(self.expanded)
         if changed:
             self.identity.style().unpolish(self.identity)
             self.identity.style().polish(self.identity)
@@ -279,6 +493,7 @@ class StudyPanel(QWidget):
         self.member_rows: dict[str, MemberRow] = {}
         self.member_order: list[str] = []
         self.history_mode = "yesterday"
+        self.weekly_selected_day: str | None = None
         self.collapsed = False
 
         self.setObjectName("study_companion_body")
@@ -410,6 +625,31 @@ class StudyPanel(QWidget):
         history_layout = QVBoxLayout(self.history_body)
         history_layout.setContentsMargins(0, 0, 0, 0)
         history_layout.setSpacing(7)
+        self.weekly_title = QLabel(self.history_body)
+        _set_font(self.weekly_title, bold=True)
+        self.weekly_title.setToolTip(self.tr(
+            "이 PC에 동기화된 Anki 복습 기록 · 한국 시간(UTC+9)",
+            "Anki review history synced to this PC · UTC+9",
+        ))
+        history_layout.addWidget(self.weekly_title)
+        self.weekly_bars = QWidget(self.history_body)
+        weekly_bars_layout = QHBoxLayout(self.weekly_bars)
+        weekly_bars_layout.setContentsMargins(0, 0, 0, 0)
+        weekly_bars_layout.setSpacing(3)
+        self.weekly_days = [WeeklyDayButton(self, self.weekly_bars) for _ in range(7)]
+        for button in self.weekly_days:
+            weekly_bars_layout.addWidget(button, 1)
+        history_layout.addWidget(self.weekly_bars)
+        self.weekly_day_detail = QLabel(self.history_body)
+        self.weekly_day_detail.setWordWrap(True)
+        self.weekly_day_detail.hide()
+        history_layout.addWidget(self.weekly_day_detail)
+        self.weekly_summary = QLabel(self.history_body)
+        self.weekly_summary.setWordWrap(True)
+        history_layout.addWidget(self.weekly_summary)
+        self.deck_history_title = QLabel(self.history_body)
+        _set_font(self.deck_history_title, bold=True)
+        history_layout.addWidget(self.deck_history_title)
         self.history_selector = QGridLayout()
         self.history_selector.setContentsMargins(0, 0, 0, 0)
         self.history_selector.setHorizontalSpacing(8)
@@ -624,8 +864,8 @@ class StudyPanel(QWidget):
         state = self.tr("닫기", "Hide") if self.history_toggle.isChecked() else self.tr("보기", "Show")
         self.history_toggle.setText(self.tr(f"내 기록    {state}", f"My history    {state}"))
         self.history_toggle.setToolTip(self.tr(
-            "이 PC의 활동 시간 기준 덱별 비교 · 모바일 기록 제외",
-            "Per-deck comparison of activity on this PC · excludes mobile reviews",
+            "최근 7일: 이 PC에 동기화된 Anki 복습 기록\n덱 비교: 이 PC의 활동 시간 · 모바일 기록 제외",
+            "Recent 7 days: Anki reviews synced to this PC\nDeck comparison: activity on this PC · excludes mobile reviews",
         ))
 
     def _comparison_value(self, result: dict | None, *names):
@@ -640,6 +880,8 @@ class StudyPanel(QWidget):
         return None
 
     def _refresh_history(self, current: datetime) -> None:
+        self._refresh_weekly(current)
+        self.deck_history_title.setText(self.tr("현재 덱 비교", "Current deck comparison"))
         tracker = self.controller.tracker
         deck_id = tracker.current_deck_id
         deck_record = tracker.today_deck(current)
@@ -705,6 +947,81 @@ class StudyPanel(QWidget):
             f"{mode_label}    {reference_text}<br>"
             f"{self.tr('평균 속도 차이', 'Average pace difference')}    {difference_text}"
         )
+
+    def _refresh_weekly(self, current: datetime) -> None:
+        self.weekly_title.setText(self.tr("최근 7일", "Recent 7 days"))
+        self.weekly_title.setToolTip(self.tr(
+            "이 PC에 동기화된 Anki 복습 기록 · 한국 시간(UTC+9)",
+            "Anki review history synced to this PC · UTC+9",
+        ))
+        getter = getattr(self.controller, "weekly_record", None)
+        record = getter(current) if callable(getter) else None
+        days = list((record or {}).get("days") or [])
+        valid = len(days) == 7
+        self.weekly_bars.setVisible(valid)
+        if not valid:
+            self.weekly_day_detail.hide()
+            self.weekly_summary.setText(
+                self.tr("주간 기록을 확인할 수 없습니다.", "Weekly history unavailable.")
+            )
+            return
+
+        maximum = max(1, *(max(0, int(day.get("answers") or 0)) for day in days))
+        today = current.date().isoformat()
+        for button, day in zip(self.weekly_days, days):
+            button.set_day(day, maximum, today)
+
+        selected = next(
+            (button for button in self.weekly_days if button.day == self.weekly_selected_day),
+            None,
+        )
+        if selected:
+            self.weekly_day_detail.setText(selected.accessibleName())
+            self.weekly_day_detail.show()
+        else:
+            self.weekly_day_detail.hide()
+
+        active_days = max(0, int(record.get("active_days") or 0))
+        answers = max(0, int(record.get("answers") or 0))
+        seconds = max(0, int(record.get("seconds") or 0))
+        previous_answers = max(0, int(record.get("previous_answers") or 0))
+        previous_seconds = max(0, int(record.get("previous_seconds") or 0))
+        answer_diff = answers - previous_answers
+        time_diff = seconds - previous_seconds
+
+        def signed_count(value: int) -> str:
+            return f"{value:+d}" if value else "±0"
+
+        def signed_time(value: int) -> str:
+            prefix = "+" if value > 0 else "−" if value < 0 else "±"
+            return prefix + self.format_clock(abs(value))
+
+        self.weekly_summary.setText(self.tr(
+            f"{active_days}일 · {self.format_clock(seconds)} · {answers}회\n"
+            f"이전 7일보다  시간 {signed_time(time_diff)} · 답변 {signed_count(answer_diff)}",
+            f"{active_days} days · {self.format_clock(seconds)} · {answers} answers\n"
+            f"vs previous 7 days  time {signed_time(time_diff)} · answers {signed_count(answer_diff)}",
+        ))
+        checked = ""
+        if record.get("as_of"):
+            try:
+                parsed = datetime.fromisoformat(str(record["as_of"]).replace("Z", "+00:00"))
+                checked = parsed.astimezone(TIMEZONE).strftime("%m/%d %H:%M")
+            except (TypeError, ValueError):
+                pass
+        cutoff = self.tr(
+            f"마지막 확인 {checked} (UTC+9)" if checked else "마지막 확인 시각(UTC+9)",
+            f"Last checked {checked} (UTC+9)" if checked else "Last checked time (UTC+9)",
+        )
+        self.weekly_summary.setToolTip(self.tr(
+            f"{cutoff} 기준으로 최근 7일과 이전 7일을 비교합니다.",
+            f"Compares recent and previous 7-day periods at {cutoff}.",
+        ))
+
+    def show_weekly_day(self, button: WeeklyDayButton) -> None:
+        self.weekly_selected_day = button.day
+        self.weekly_day_detail.setText(button.accessibleName())
+        self.weekly_day_detail.setVisible(True)
 
     def _rate_text(self, value) -> str:
         if value is None:

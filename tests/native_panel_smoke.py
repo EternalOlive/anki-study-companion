@@ -88,6 +88,12 @@ class FakeController:
                     "answer_count": 42,
                     "time_goal_minutes": 60,
                     "card_goal": 100,
+                    "activity_known": True,
+                    "activity_buckets": [
+                        {"slot": 30, "answer_count": 4, "time_ms": 72000},
+                        {"slot": 31, "answer_count": 3, "time_ms": 51000},
+                        {"slot": 62, "answer_count": 7, "time_ms": 98000},
+                    ],
                 },
                 {
                     "user_id": "friend-b",
@@ -98,6 +104,8 @@ class FakeController:
                     "answer_count": 19,
                     "time_goal_minutes": 45,
                     "card_goal": 80,
+                    "activity_known": False,
+                    "activity_buckets": [],
                 },
             ],
         }
@@ -119,6 +127,24 @@ class FakeController:
 
     def study_record(self, current):
         return self.tracker.today(current)
+
+    def weekly_record(self, current):
+        days = []
+        for offset, answers in zip(range(6, -1, -1), (18, 0, 24, 31, 12, 37, 48)):
+            days.append({
+                "day": (current.date() - timedelta(days=offset)).isoformat(),
+                "answers": answers,
+                "seconds": answers * 32,
+            })
+        return {
+            "days": days,
+            "answers": sum(day["answers"] for day in days),
+            "seconds": sum(day["seconds"] for day in days),
+            "active_days": sum(day["answers"] > 0 for day in days),
+            "previous_answers": 143,
+            "previous_seconds": 4620,
+            "as_of": current.isoformat(),
+        }
 
 
 def main() -> int:
@@ -168,7 +194,7 @@ def main() -> int:
         "active_seconds": 30 * 60, "answer_count": 60,
     })
     panel = StudyPanel(controller)
-    panel.resize(320, 720)
+    panel.resize(340, 900)
     panel.show()
     app.processEvents()
 
@@ -193,9 +219,22 @@ def main() -> int:
     panel.history_toggle.setChecked(True)
     app.processEvents()
 
-    assert panel.width() == 320
+    assert panel.width() == 340
     assert first_row.details.isVisible()
+    assert first_row.activity_timeline.isVisible()
+    assert "07:30–07:45" in first_row.activity_timeline.accessibleName()
+    assert "4회" in first_row.activity_timeline.accessibleName()
+    current_friend = first_row.member
+    first_row.update_member(dict(current_friend, study_day=yesterday))
+    assert "시간대 기록 없음" in first_row.activity_timeline.accessibleName()
+    assert "07:30–07:45" not in first_row.activity_timeline.accessibleName()
+    first_row.update_member(current_friend)
+    assert "시간대 기록 없음" in panel.member_rows["friend-b"].activity_timeline.accessibleName()
     assert panel.history_body.isVisible()
+    assert panel.weekly_bars.isVisible()
+    assert len(panel.weekly_days) == 7
+    assert "오늘 진행 중" in panel.weekly_days[-1].accessibleName()
+    assert "이전 7일보다" in panel.weekly_summary.text()
     assert len(panel.member_rows) == 2
     assert first_row.dot.text() == "●" and first_row.dot.isVisible()
     online_row = panel.member_rows["friend-b"]
@@ -214,20 +253,31 @@ def main() -> int:
     assert panel.format_clock(3599) == "59:59"
     assert panel.format_clock(0) == "00:00"
     assert panel.format_clock(36000) == "10:00:00"
-    # Empty details never expand; stale time is shown once in the summary.
+    # A friend without deck/goals can still open the activity timeline; stale
+    # time is shown once in the summary.
     empty_friend = dict(online_row.member, status="offline", time_goal_minutes=0,
                         card_goal=0, current_deck_name=None)
     online_row.update_member(empty_friend)
     online_row.identity.click()
-    assert not online_row.expanded and not online_row.details.text()
+    assert online_row.expanded and not online_row.details.text()
+    assert "시간대 기록 없음" in online_row.activity_timeline.accessibleName()
     assert "갱신 " in online_row.identity_text.text()
     assert "목표 없음" not in online_row.details.text()
+    online_row.update_member(dict(empty_friend, activity_known=True, activity_buckets=[]))
+    assert "오늘 답변 기록 없음" in online_row.activity_timeline.accessibleName()
+    online_row.update_member(dict(empty_friend, activity_error="timeout"))
+    assert "시간대 동기화 지연" in online_row.activity_timeline.accessibleName()
     online_row.update_member(dict(empty_friend, active_seconds=None, answer_count=None))
     assert online_row.time.text() == "—" and online_row.answers.text() == "—"
     online_row.update_member(controller.online["members"][1])
     # Clicking the numeric side of the row and keyboard Space both toggle details.
     from PyQt6.QtTest import QTest
     from PyQt6.QtCore import Qt
+    panel.weekly_days[-1].setFocus()
+    QTest.keyClick(panel.weekly_days[-1], Qt.Key.Key_Space)
+    assert panel.weekly_day_detail.isVisible()
+    assert "오늘 진행 중" in panel.weekly_day_detail.text()
+    assert "마지막 확인" in panel.weekly_summary.toolTip()
     numeric_point = first_row.time.geometry().center()
     QTest.mouseClick(first_row.identity, Qt.MouseButton.LeftButton, pos=numeric_point)
     assert not first_row.expanded
@@ -264,6 +314,8 @@ def main() -> int:
     assert first_row.details.text().startswith("영어::<단어>")
     assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
     assert panel.history_toggle.isChecked()
+    assert panel.weekly_title.text() == "Recent 7 days"
+    assert "today in progress" in panel.weekly_days[-1].accessibleName()
     assert panel.collapse_panel.toolTip() == "Collapse panel"
     assert panel.format_duration(3600) == "1:00:00"
 
@@ -310,11 +362,15 @@ def main() -> int:
     long_member["display_name"] = "아침마다도서관창가에서공부하는친구"
     long_member["active_seconds"] = 6 * 3600 + 25 * 60
     large = StudyPanel(controller)
-    large.resize(280, 760)
+    large.resize(280, 900)
     large.show()
     app.processEvents()
 
     large_row = large.member_rows["friend-a"]
+    large_unknown_row = large.member_rows["friend-b"]
+    large_unknown_row.identity.click()
+    large.history_toggle.setChecked(True)
+    app.processEvents()
     assert large._own_compact
     assert large_row._compact
     assert large.member_scroll.horizontalScrollBar().maximum() == 0
@@ -322,10 +378,31 @@ def main() -> int:
     assert large_row.identity.toolTip().startswith("아침마다도서관")
     assert large.own_time.geometry().right() <= large.content.width()
     assert large.own_answers.geometry().right() <= large.content.width()
+    assert large_unknown_row.activity_timeline.isVisible()
+    assert "시간대 기록 없음" in large_unknown_row.activity_timeline.accessibleName()
+    assert large.weekly_days[-1].width() >= 20
 
     korean_large = OUTPUT / "native-ko-large-280.png"
     if not large.grab().save(str(korean_large)):
         raise RuntimeError(f"could not save {korean_large}")
+
+    # The real dock wraps StudyPanel in an outer scroll area. With expanded
+    # history and 150% text, every section remains reachable vertically.
+    outer_scroll = QtWidgets.QScrollArea()
+    outer_scroll.setWidgetResizable(True)
+    outer_scroll.setWidget(large)
+    outer_scroll.resize(300, 650)
+    outer_scroll.show()
+    app.processEvents()
+    assert outer_scroll.verticalScrollBar().maximum() > 0
+    outer_scroll.ensureWidgetVisible(large.history_summary)
+    app.processEvents()
+    assert outer_scroll.verticalScrollBar().value() > 0
+    assert outer_scroll.grab().save(str(OUTPUT / "native-ko-large-scroll-bottom.png"))
+    outer_scroll.takeWidget()
+    outer_scroll.close()
+    large.setParent(None)
+    large.show()
 
     controller.locale = "en"
     controller.online["group"]["name"] = "Saturday Morning Language Study Room"

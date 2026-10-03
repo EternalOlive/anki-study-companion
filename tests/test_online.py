@@ -205,6 +205,11 @@ class SupabaseClientTests(unittest.TestCase):
             ],
             [{"id": "u1", "display_name": "윤"}, {"id": "u2", "display_name": "친구"}],
             [{"user_id": "u2", "current_deck_name": "English::Words"}],
+            [{"user_id": "u1", "study_day": "2026-09-30",
+              "activity_known": True,
+              "activity_buckets": [{"slot": 42, "answer_count": 3, "time_ms": 4500}]},
+             {"user_id": "u2", "study_day": "2026-09-30",
+              "activity_known": True, "activity_buckets": []}],
         ])
         client = SupabaseClient(opener=opener)
 
@@ -213,6 +218,11 @@ class SupabaseClientTests(unittest.TestCase):
         self.assertEqual([row["display_name"] for row in rows], ["윤", "친구"])
         self.assertEqual(rows[1]["current_deck_name"], "English::Words")
         self.assertNotIn("current_deck_name", rows[0])
+        self.assertTrue(rows[0]["activity_known"])
+        self.assertEqual(rows[0]["activity_buckets"], [
+            {"slot": 42, "answer_count": 3, "time_ms": 4500}
+        ])
+        self.assertEqual(rows[1]["activity_buckets"], [])
         membership_query = parse_qs(urlparse(opener.calls[0][0].full_url).query)
         stats_query = parse_qs(urlparse(opener.calls[1][0].full_url).query)
         profile_query = parse_qs(urlparse(opener.calls[2][0].full_url).query)
@@ -220,6 +230,9 @@ class SupabaseClientTests(unittest.TestCase):
         self.assertEqual(stats_query["group_id"], ["eq.g1"])
         self.assertEqual(stats_query["study_day"], ["eq.2026-09-30"])
         self.assertEqual(profile_query["id"], ["in.(u1,u2)"])
+        self.assertEqual(body_of(opener.calls[4][0]), {
+            "target_group": "g1", "target_day": "2026-09-30",
+        })
 
     def test_fetch_with_no_stats_returns_group_members_with_zeroes(self):
         opener = FakeOpener([
@@ -227,12 +240,74 @@ class SupabaseClientTests(unittest.TestCase):
             [],
             [{"id": "u1", "display_name": "윤"}],
             [],
+            [],
         ])
         rows = SupabaseClient(opener=opener).fetch_group_today("access", "g1", "2026-09-30")
         self.assertEqual(rows[0]["display_name"], "윤")
         self.assertEqual(rows[0]["answer_count"], 0)
         self.assertEqual(rows[0]["status"], "stopped")
-        self.assertEqual(len(opener.calls), 4)
+        self.assertFalse(rows[0]["activity_known"])
+        self.assertEqual(rows[0]["activity_buckets"], [])
+        self.assertEqual(len(opener.calls), 5)
+
+    def test_fetch_timeline_404_keeps_totals_as_unknown(self):
+        missing = HTTPError(
+            "https://example/rest/v1/rpc/get_group_activity_timeline",
+            404, "missing", {}, io.BytesIO(b'{}'),
+        )
+        opener = FakeOpener([
+            [{"user_id": "u1"}],
+            [{"user_id": "u1", "answer_count": 9}],
+            [{"id": "u1", "display_name": "윤"}],
+            [],
+            missing,
+        ])
+
+        rows = SupabaseClient(opener=opener).fetch_group_today(
+            "access", "g1", "2026-09-30"
+        )
+
+        self.assertEqual(rows[0]["answer_count"], 9)
+        self.assertFalse(rows[0]["activity_known"])
+        self.assertEqual(rows[0]["activity_buckets"], [])
+        self.assertNotIn("activity_error", rows[0])
+
+    def test_fetch_timeline_transient_error_is_attached_without_losing_totals(self):
+        unavailable = HTTPError(
+            "https://example/rest/v1/rpc/get_group_activity_timeline",
+            503, "unavailable", {}, io.BytesIO(b'{"message":"temporarily unavailable"}'),
+        )
+        opener = FakeOpener([
+            [{"user_id": "u1"}],
+            [{"user_id": "u1", "active_seconds": 90, "answer_count": 4}],
+            [{"id": "u1", "display_name": "윤"}],
+            [],
+            unavailable,
+        ])
+
+        rows = SupabaseClient(opener=opener).fetch_group_today(
+            "access", "g1", "2026-09-30"
+        )
+
+        self.assertEqual(rows[0]["active_seconds"], 90)
+        self.assertEqual(rows[0]["answer_count"], 4)
+        self.assertIs(rows[0]["activity_error"], True)
+
+    def test_fetch_timeline_auth_error_is_not_hidden(self):
+        unauthorized = HTTPError(
+            "https://example/rest/v1/rpc/get_group_activity_timeline",
+            401, "unauthorized", {}, io.BytesIO(b'{"message":"expired"}'),
+        )
+        opener = FakeOpener([
+            [{"user_id": "u1"}], [], [{"id": "u1", "display_name": "윤"}],
+            [], unauthorized,
+        ])
+
+        with self.assertRaises(SupabaseError) as caught:
+            SupabaseClient(opener=opener).fetch_group_today(
+                "access", "g1", "2026-09-30"
+            )
+        self.assertEqual(caught.exception.status, 401)
 
     def test_http_error_exposes_server_message_without_credentials(self):
         error = HTTPError(

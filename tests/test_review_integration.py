@@ -21,6 +21,7 @@ from study_companion.online import (
 )
 from study_companion.outbox import SyncOutbox
 from study_companion.reviews import ReviewHistory
+from study_companion.activity import weekly_activity
 
 
 ADDON = Path(__file__).parents[1] / "study_companion" / "addon.py"
@@ -102,6 +103,7 @@ class ReviewCollectionIntegrationTests(TestCase):
                 "datetime": datetime,
                 "timedelta": timedelta,
                 "TIMEZONE": KST,
+                "weekly_activity": weekly_activity,
             },
         )
         self.controller = self.controller_type()
@@ -112,6 +114,7 @@ class ReviewCollectionIntegrationTests(TestCase):
         self.controller.review_allow_removals = False
         self.controller.review_upload_requested = True
         self.controller.review_history = ReviewHistory({}, now_ms=lambda: 123)
+        self.controller._weekly_activity = None
         self.controller.online = {}
         self.controller.save = Mock()
         self.controller.refresh = Mock()
@@ -154,7 +157,7 @@ class ReviewCollectionIntegrationTests(TestCase):
         result = operation.op(self.col)
 
         expected_start = int(
-            datetime(2026, 10, 3, 0, 0, tzinfo=KST).timestamp() * 1000
+            datetime(2026, 9, 21, 0, 0, tzinfo=KST).timestamp() * 1000
         )
         expected_end = int(
             datetime(2026, 10, 5, 0, 0, tzinfo=KST).timestamp() * 1000
@@ -174,6 +177,7 @@ class ReviewCollectionIntegrationTests(TestCase):
         self.controller.save.assert_called_once()
         self.controller.refresh.assert_called_once()
         self.controller.sync_async.assert_called_once_with(force=True)
+        self.assertEqual(self.controller._weekly_activity["record"]["answers"], 1)
 
     def test_midnight_restart_recovers_the_previous_days_last_review(self):
         self._install_query_op()
@@ -200,6 +204,37 @@ class ReviewCollectionIntegrationTests(TestCase):
             for batch in self.controller.review_history.pending("user", "room")
         }
         self.assertEqual(pending_days, {"2026-10-04", "2026-10-05"})
+
+    def test_complete_empty_query_returns_known_zero_week(self):
+        self._install_query_op()
+        self.col.db.all.return_value = []
+
+        self.controller.refresh_review_history()
+        operation = _QueryOp.instances[0]
+        operation.success(operation.op(self.col))
+
+        weekly = self.controller._weekly_activity["record"]
+        self.assertEqual(len(weekly["days"]), 7)
+        self.assertEqual(weekly["answers"], 0)
+        self.assertEqual(weekly["previous_answers"], 0)
+        self.assertEqual(
+            self.controller.review_history.today("2026-10-04"),
+            {"seconds": 0.0, "answers": 0},
+        )
+
+    def test_weekly_cutoff_advances_while_query_waits_in_queue(self):
+        self._install_query_op()
+        self.controller.refresh_review_history()
+        operation = _QueryOp.instances[0]
+
+        self.current = self.current + timedelta(minutes=1)
+        latest = int((self.current - timedelta(seconds=1)).timestamp() * 1000)
+        self.col.db.all.return_value = [(latest, 77, 1000, 3, 1)]
+        operation.success(operation.op(self.col))
+
+        weekly = self.controller._weekly_activity["record"]
+        self.assertEqual(weekly["answers"], 1)
+        self.assertEqual(weekly["as_of"], self.current.isoformat())
 
     def test_explicit_undo_removals_are_limited_to_today(self):
         self._install_query_op()
@@ -234,6 +269,9 @@ class ReviewCollectionIntegrationTests(TestCase):
         self.assertEqual(
             self.controller.review_history.today("2026-10-04")["answers"], 0
         )
+        weekly = self.controller._weekly_activity["record"]
+        self.assertEqual(weekly["days"][-1]["answers"], 0)
+        self.assertEqual(weekly["answers"], 1)
 
     def test_query_is_serialized_and_not_started_during_anki_sync(self):
         self._install_query_op()
@@ -259,6 +297,66 @@ class ReviewCollectionIntegrationTests(TestCase):
         self.assertTrue(self.controller.review_dirty)
         self.assertTrue(self.controller.review_allow_removals)
         self.assertTrue(self.controller.review_upload_requested)
+
+    def test_failed_query_clears_previous_weekly_snapshot(self):
+        self._install_query_op()
+        self.controller._weekly_activity = {"day": "2026-10-04", "record": {}}
+
+        self.controller.refresh_review_history()
+        _QueryOp.instances[0].on_failure(RuntimeError("database unavailable"))
+
+        self.assertIsNone(self.controller._weekly_activity)
+        self.assertTrue(self.controller.review_dirty)
+
+    def test_weekly_record_distinguishes_unknown_and_stale_snapshots(self):
+        controller_type = _controller_with(
+            "weekly_record", scope={"mw": self.mw}
+        )
+        controller = controller_type()
+        controller.review_history = ReviewHistory({}, now_ms=lambda: 123)
+        controller._weekly_activity = None
+        self.assertIsNone(controller.weekly_record(self.current))
+
+        controller.review_history.observe("1700000000", "2026-10-04", [])
+        record = {"days": [], "answers": 0, "seconds": 0.0}
+        controller._weekly_activity = {
+            "day": "2026-10-04",
+            "collection_key": "1700000000",
+            "collection_identity": id(self.mw.col),
+            "record": record,
+        }
+        self.assertIs(controller.weekly_record(self.current), record)
+
+        original_collection = self.mw.col
+        self.mw.col = SimpleNamespace(crt=1800000000)
+        self.assertIsNone(controller.weekly_record(self.current))
+        self.mw.col = original_collection
+        self.assertIsNone(
+            controller.weekly_record(self.current + timedelta(days=1))
+        )
+
+    def test_weekly_record_never_reads_collection_crt_on_ui_thread(self):
+        class DatabaseBackedCollection:
+            @property
+            def crt(self):
+                raise AssertionError("weekly_record must not query collection.crt")
+
+        collection = DatabaseBackedCollection()
+        controller_type = _controller_with(
+            "weekly_record", scope={"mw": SimpleNamespace(col=collection)}
+        )
+        controller = controller_type()
+        controller.review_history = ReviewHistory({}, now_ms=lambda: 123)
+        controller.review_history.state["active_collection"] = "collection"
+        record = {"days": [], "answers": 0, "seconds": 0.0}
+        controller._weekly_activity = {
+            "day": "2026-10-04",
+            "collection_key": "collection",
+            "collection_identity": id(collection),
+            "record": record,
+        }
+
+        self.assertIs(controller.weekly_record(self.current), record)
 
 
 class ReviewDeliveryIntegrationTests(TestCase):

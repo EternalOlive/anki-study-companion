@@ -573,7 +573,20 @@ class SupabaseClient:
             if error.status != 404:
                 raise
             decks = []  # Older servers still show study totals.
+        activity_error = False
+        try:
+            activity = self._request(
+                "POST", "/rest/v1/rpc/get_group_activity_timeline", token=token,
+                body={"target_group": group_id, "target_day": day},
+            ) or []
+        except SupabaseError as error:
+            if error.status in (401, 403):
+                raise
+            activity = []
+            if error.status != 404:
+                activity_error = True
         decks_by_user = {row["user_id"]: row for row in decks}
+        activity_by_user = {row["user_id"]: row for row in activity}
         stats_by_user = {row["user_id"]: row for row in stats}
         merged = []
         for membership in memberships:
@@ -587,9 +600,18 @@ class SupabaseClient:
                 "time_goal_minutes": 0,
                 "card_goal": 0,
                 "status": "stopped",
+                "activity_known": False,
+                "activity_buckets": [],
             }
             item.update(stats_by_user.get(user_id, {}))
             item.update(decks_by_user.get(user_id, {}))
+            timeline = activity_by_user.get(user_id, {})
+            if isinstance(timeline.get("activity_known"), bool):
+                item["activity_known"] = timeline["activity_known"]
+            if isinstance(timeline.get("activity_buckets"), list):
+                item["activity_buckets"] = timeline["activity_buckets"]
+            if activity_error:
+                item["activity_error"] = True
             item["display_name"] = names.get(user_id)
             merged.append(item)
         return merged

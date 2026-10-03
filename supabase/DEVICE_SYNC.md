@@ -13,8 +13,9 @@ were checked successfully.
 - Native day markers switch that account/day's totals from the legacy device
   sums to native events, including a genuinely empty day. Never add both.
 - `record_device_day` remains the source of live PC status and personal goals.
-- Client queries yesterday and today through Anki's serialized `QueryOp` queue
-  after startup, collection operations, and Anki sync. Yesterday covers a final
+- Client queries the last 14 calendar days through Anki's serialized `QueryOp`
+  queue for a private local weekly summary, but observes/uploads only yesterday
+  and today after startup, collection operations, and Anki sync. Yesterday covers a final
   review not collected before closing at midnight; this is not full backfill.
 - Batches and exact acknowledgements persist locally, isolated by account/room.
   New observations survive late callbacks. Same native events on two PCs do not
@@ -27,7 +28,24 @@ were checked successfully.
   caution: the namespace is Anki's synced creation timestamp, not a new UUID.
 - Real mobile→AnkiWeb→PC end-to-end use has not yet been verified on a phone.
 
-The following describes the legacy activity totals and current presence channel.
+## Friend activity timeline (2026-10-04)
+
+Apply `migrations/20261004_activity_timeline.sql` after synced review totals.
+`get_group_activity_timeline` checks authenticated room membership and returns
+quarter-hour answer counts and recorded milliseconds, never raw event identities.
+Only the current Asia/Seoul day is queryable; past and future dates are rejected.
+Markers distinguish an observed empty day from unknown history. Deleted answers
+are excluded. These buckets are not continuous study sessions.
+
+The migration and `tests/activity_timeline.sql` were executed together and rolled
+back successfully on the production project, including 00:15/24:00 edges,
+duplicates, tombstones, known-empty/unknown days and nonmember/unauthenticated
+denial and past/future date rejection. The migration alone was then committed. Function availability, member
+execution permission, anonymous denial and private raw-event access all verified.
+No test accounts or rooms were retained. Clients without the endpoint keep daily
+totals; a transient timeline error does not discard the other room information.
+
+## Legacy activity totals and current presence
 
 Apply `migrations/20261003_activate_device_sync.sql` as one transaction. It
 keeps accounts, rooms, memberships and old `daily_stats` rows, but new reads

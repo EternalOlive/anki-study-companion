@@ -33,6 +33,7 @@ from .online import (
 )
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
 from .outbox import SyncOutbox
+from .activity import weekly_activity
 from .reviews import ReviewHistory
 from .panel import PanelToggleButton, StudyPanel
 from .tracker import (
@@ -88,6 +89,7 @@ class Controller:
         )
         self.online = data.get("online", {})
         self.review_history = ReviewHistory(data.get("review_history", {}))
+        self._weekly_activity = None
         self.review_dirty = True
         self.review_query_in_flight = False
         self.review_syncing = False
@@ -227,6 +229,21 @@ class Controller:
     def study_record(self, current):
         return self.review_history.today(current.date().isoformat()) or {"seconds": 0, "answers": 0}
 
+    def weekly_record(self, current):
+        snapshot = self._weekly_activity
+        if not isinstance(snapshot, dict):
+            return None
+        if snapshot.get("day") != current.date().isoformat():
+            return None
+        current_collection = getattr(mw, "col", None)
+        if current_collection is None:
+            return None
+        if snapshot.get("collection_identity") != id(current_collection):
+            return None
+        if snapshot.get("collection_key") != self.review_history.state.get("active_collection"):
+            return None
+        return snapshot.get("record")
+
     def refresh_review_history(self):
         """Read native logs through Anki's serialized collection queue, not the UI timer.
 
@@ -239,10 +256,11 @@ class Controller:
 
         current = now()
         today = current.date().isoformat()
-        start = current.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
-        yesterday = start.date().isoformat()
+        today_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = today_start - timedelta(days=13)
+        yesterday = (today_start - timedelta(days=1)).date().isoformat()
         start_ms = int(start.timestamp() * 1000)
-        end_ms = int((start + timedelta(days=2)).timestamp() * 1000)
+        end_ms = int((today_start + timedelta(days=1)).timestamp() * 1000)
         self.review_dirty = False
         self.review_query_in_flight = True
         allow_removals = self.review_allow_removals
@@ -251,16 +269,25 @@ class Controller:
         self.review_upload_requested = False
 
         def query(col):
-            return str(col.crt), col.db.all(
+            rows = col.db.all(
                 "select id, cid, time, ease, type from revlog where id >= ? and id < ? order by id",
                 start_ms, end_ms,
+            )
+            aggregate_current = now()
+            if aggregate_current.date() != current.date():
+                # Keep the snapshot on the queried day. The next timer tick
+                # immediately issues the new day's correctly bounded query.
+                aggregate_current = current
+            return (
+                str(col.crt), id(col), rows,
+                weekly_activity(rows, aggregate_current),
             )
 
         def success(result):
             self.review_query_in_flight = False
             if self.closed:
                 return
-            collection_key, rows = result
+            collection_key, collection_identity, rows, weekly = result
             rows_by_day = {yesterday: [], today: []}
             for row in rows:
                 try:
@@ -273,6 +300,12 @@ class Controller:
             self.review_history.observe(
                 collection_key, today, rows_by_day[today], allow_removals=allow_removals
             )
+            self._weekly_activity = {
+                "day": today,
+                "collection_key": str(collection_key),
+                "collection_identity": collection_identity,
+                "record": weekly,
+            }
             self.online.pop("review_error", None)
             try:
                 self.save()
@@ -289,6 +322,7 @@ class Controller:
         def failure(error):
             self.review_query_in_flight = False
             if not self.closed:
+                self._weekly_activity = None
                 self.review_dirty = True
                 self.review_allow_removals |= allow_removals
                 self.review_upload_requested |= upload_requested
