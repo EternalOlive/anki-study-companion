@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 from study_companion.online import DeviceSyncLedger
 from study_companion.outbox import SyncOutbox
+from study_companion.reviews import ReviewHistory
 
 
 class SyncStartTests(TestCase):
@@ -37,6 +38,7 @@ class SyncStartTests(TestCase):
         self.controller.device_id = 'device'
         self.controller.device_ledger = DeviceSyncLedger({})
         self.controller.sync_outbox = SyncOutbox({})
+        self.controller.review_history = ReviewHistory({})
         self.controller.save = Mock()
         self.controller.t = lambda ko, en: ko
 

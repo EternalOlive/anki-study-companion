@@ -40,6 +40,18 @@ def headers_of(request):
 
 
 class SupabaseClientTests(unittest.TestCase):
+    def test_review_upload_checks_receipt_and_omits_device_identity(self):
+        batch = {"source_collection": "1700000000", "target_day": "2026-10-04",
+                 "reviews": [{"id": "1791039601000", "card_id": "123", "time_ms": 1500, "changed_at": 0}],
+                 "removed_ids": []}
+        opener = FakeOpener([[{"study_day": "2026-10-04", "active_review_count": 1, "active_time_ms": 1500}]])
+        SupabaseClient(opener=opener).sync_review_day("access", group_id="room", batch=batch)
+        sent = body_of(opener.calls[0][0])
+        self.assertEqual(sent, {"target_group": "room", **batch})
+        for bad in (None, [], {}, [{"study_day": "2026-10-03", "active_review_count": 1, "active_time_ms": 1500}]):
+            with self.subTest(bad=bad), self.assertRaises(SupabaseError):
+                SupabaseClient(opener=FakeOpener([bad])).sync_review_day("access", group_id="room", batch=batch)
+
     def test_safe_invite_errors_and_rotation(self):
         for result, status in (({"ok": False, "error": "TOO_MANY_ATTEMPTS"}, 429),
                                ({"ok": False, "error": "INVALID_INVITE_CODE"}, 400)):

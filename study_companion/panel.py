@@ -604,6 +604,11 @@ class StudyPanel(QWidget):
             self._refresh_history(_now())
 
     def _handle_error_action(self) -> None:
+        if self.controller.online.get("review_error"):
+            self.controller.review_dirty = True
+            self.controller.review_upload_requested = True
+            self.controller.refresh_review_history()
+            return
         if self.controller.online.get("recovery_notice") and not self.controller.online.get("last_error"):
             self.controller.online.pop("recovery_notice", None)
             self.controller.save()
@@ -618,6 +623,10 @@ class StudyPanel(QWidget):
     def _update_history_toggle(self) -> None:
         state = self.tr("닫기", "Hide") if self.history_toggle.isChecked() else self.tr("보기", "Show")
         self.history_toggle.setText(self.tr(f"내 기록    {state}", f"My history    {state}"))
+        self.history_toggle.setToolTip(self.tr(
+            "이 PC의 활동 시간 기준 덱별 비교 · 모바일 기록 제외",
+            "Per-deck comparison of activity on this PC · excludes mobile reviews",
+        ))
 
     def _comparison_value(self, result: dict | None, *names):
         if not result:
@@ -739,7 +748,7 @@ class StudyPanel(QWidget):
         self.update_collapse_controls()
         current = _now()
         tracker = self.controller.tracker
-        record = tracker.today(current)
+        record = self.controller.study_record(current)
         group = self.controller.online.get("group")
         raw_members = self.controller.online.get("members")
         my_id = (self.controller.online.get("auth") or {}).get("user_id")
@@ -782,16 +791,15 @@ class StudyPanel(QWidget):
         self.manage.setAccessibleName(self.tr("스터디방 관리", "Manage study room"))
 
         self.own_title.setText(
-            self.tr("나 · 전체 PC", "You · all PCs") if group
-            else self.tr("이 PC · 오늘", "This PC · today")
+            self.tr("나 · 오늘", "You · today")
         )
         my_total = next((member for member in (raw_members or [])
                          if member.get("user_id") == my_id
                          and member.get("study_day") == current.date().isoformat()), None)
         self.own_title.setToolTip(
             self.tr(
-                f"마지막 동기화 기준 · 한국 시간 자정(UTC+9)\n이 PC: {self.format_duration(int(record.get('seconds') or 0))} · {int(record.get('answers') or 0)}회",
-                f"Last synced · day resets at midnight UTC+9\nThis PC: {self.format_duration(int(record.get('seconds') or 0))} · {int(record.get('answers') or 0)} answers",
+                "Anki 복습 기록 기준 · 한국 시간 자정(UTC+9)\n모바일 기록은 모바일과 PC의 Anki 동기화 후 반영됩니다.\n시간은 Anki가 저장한 답변 시간이며 실행 중인 타이머가 아닙니다.",
+                "Anki review history · resets at midnight UTC+9\nMobile reviews appear after syncing Anki on mobile and PC.\nTime is recorded answer time, not a running stopwatch.",
             )
         )
         own_status = self.status_text(
@@ -844,16 +852,17 @@ class StudyPanel(QWidget):
         if self.history_toggle.isChecked():
             self._refresh_history(current)
 
-        error = self.controller.online.get("last_error") or self.controller.online.get("recovery_notice")
+        retryable = self.controller.online.get("review_error") or self.controller.online.get("last_error")
+        error = retryable or self.controller.online.get("recovery_notice")
         self.error_box.setVisible(bool(error))
         if error:
             self.error_text.setText(
-                self.tr("동기화 지연", "Sync delayed") if self.controller.online.get("last_error")
+                self.tr("동기화 지연", "Sync delayed") if retryable
                 else str(error)
             )
             self.error_text.setToolTip(str(error))
             self.retry.setText(
-                self.tr("재시도", "Retry") if self.controller.online.get("last_error")
+                self.tr("재시도", "Retry") if retryable
                 else self.tr("확인", "Dismiss")
             )
             self.retry.setVisible(True)

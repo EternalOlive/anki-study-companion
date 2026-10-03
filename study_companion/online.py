@@ -494,6 +494,23 @@ class SupabaseClient:
             raise DeviceSnapshotConflict(stored)
         return stored
 
+    def sync_review_day(self, token: str, *, group_id: str, batch: dict) -> None:
+        """Send native review identities, never add collection totals per PC."""
+        result = self._request(
+            "POST", "/rest/v1/rpc/sync_review_day", token=token,
+            body={"target_group": group_id,
+                  "source_collection": batch["source_collection"],
+                  "target_day": batch["target_day"],
+                  "reviews": batch["reviews"],
+                  "removed_ids": batch["removed_ids"]},
+        )
+        receipt = self._first(result)
+        if (not isinstance(receipt, dict)
+                or receipt.get("study_day") != batch["target_day"]
+                or not isinstance(receipt.get("active_review_count"), int)
+                or not isinstance(receipt.get("active_time_ms"), int)):
+            raise SupabaseError("복습 기록 저장 결과를 확인하지 못했습니다. / Review receipt missing.")
+
     def set_current_deck(self, token: str, group_id: str, device_id: str,
                          deck_name: str | None) -> None:
         self._request(

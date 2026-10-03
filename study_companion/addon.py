@@ -33,6 +33,7 @@ from .online import (
 )
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
 from .outbox import SyncOutbox
+from .reviews import ReviewHistory
 from .panel import PanelToggleButton, StudyPanel
 from .tracker import (
     StudyTracker,
@@ -86,6 +87,12 @@ class Controller:
             card_goal=data.get("card_goal", 0),
         )
         self.online = data.get("online", {})
+        self.review_history = ReviewHistory(data.get("review_history", {}))
+        self.review_dirty = True
+        self.review_query_in_flight = False
+        self.review_syncing = False
+        self.review_allow_removals = False
+        self.review_upload_requested = True
         device_path = self.path.parent.parent / "study_companion-device.json"
         try:
             installation_id = load_or_create_device_id(device_path)
@@ -126,6 +133,7 @@ class Controller:
         self.timer.start()
         self.ticks_since_save = 0
         self.refresh()
+        QTimer.singleShot(0, self.refresh_review_history)
         QTimer.singleShot(1000, self.ensure_online_identity)
 
     def close(self):
@@ -151,6 +159,7 @@ class Controller:
         data["online"] = self.online
         data["language"] = self.locale
         data["ui_state"] = self.ui_state
+        data["review_history"] = self.review_history.state
         payload = json.dumps(data, ensure_ascii=False)
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(payload, encoding="utf-8")
@@ -158,6 +167,8 @@ class Controller:
 
     def tick(self):
         self.tracker.tick(now())
+        if self.review_dirty or self.review_history.today(now().date().isoformat()) is None:
+            self.refresh_review_history()
         self.ticks_since_save += 1
         if self.ticks_since_save >= 30:
             self.save()
@@ -187,6 +198,8 @@ class Controller:
 
     def answer(self, reviewer, card, ease):
         self.tracker.answer(now())
+        self.review_dirty = True
+        self.refresh_review_history()
         self.save()
         self.refresh()
 
@@ -198,18 +211,93 @@ class Controller:
             self.sync_async(force=True)
 
     def refresh(self):
-        record = self.tracker.today(now())
+        record = self.study_record(now())
         duration = self.panel_body.format_clock(int(record["seconds"]))
         status = {"studying": self.t("공부 중", "Studying"), "paused": self.t("잠시 멈춤", "Paused"), "stopped": self.t("접속 중", "Online")}[
             self.tracker.status
         ]
-        time_goal = f"/{self.tracker.time_goal_minutes}{self.t('분', 'm')}" if self.tracker.time_goal_minutes else ""
+        time_goal = f"/{self.panel_body.format_clock(self.tracker.time_goal_minutes * 60)}" if self.tracker.time_goal_minutes else ""
         card_goal = f"/{self.tracker.card_goal}" if self.tracker.card_goal else ""
         self.label.setText(
             f"{self.t('오늘', 'Today')} {duration}{time_goal}  "
             f"{self.t('답변', 'Answers')} {record['answers']}{card_goal}  {status}"
         )
         self.refresh_panel()
+
+    def study_record(self, current):
+        return self.review_history.today(current.date().isoformat()) or {"seconds": 0, "answers": 0}
+
+    def refresh_review_history(self):
+        """Read native logs through Anki's serialized collection queue, not the UI timer.
+
+        Sync/restore can temporarily remove local rows, so absence alone is never
+        sent as a deletion of another device's study history.
+        """
+        if self.closed or self.review_query_in_flight or self.review_syncing or not mw.col:
+            return
+        from aqt.operations import QueryOp
+
+        current = now()
+        today = current.date().isoformat()
+        start = current.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        yesterday = start.date().isoformat()
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int((start + timedelta(days=2)).timestamp() * 1000)
+        self.review_dirty = False
+        self.review_query_in_flight = True
+        allow_removals = self.review_allow_removals
+        self.review_allow_removals = False
+        upload_requested = self.review_upload_requested
+        self.review_upload_requested = False
+
+        def query(col):
+            return str(col.crt), col.db.all(
+                "select id, cid, time, ease, type from revlog where id >= ? and id < ? order by id",
+                start_ms, end_ms,
+            )
+
+        def success(result):
+            self.review_query_in_flight = False
+            if self.closed:
+                return
+            collection_key, rows = result
+            rows_by_day = {yesterday: [], today: []}
+            for row in rows:
+                try:
+                    row_day = datetime.fromtimestamp(int(row[0]) / 1000, TIMEZONE).date().isoformat()
+                except (IndexError, TypeError, ValueError, OverflowError, OSError):
+                    continue
+                if row_day in rows_by_day:
+                    rows_by_day[row_day].append(row)
+            self.review_history.observe(collection_key, yesterday, rows_by_day[yesterday])
+            self.review_history.observe(
+                collection_key, today, rows_by_day[today], allow_removals=allow_removals
+            )
+            self.online.pop("review_error", None)
+            try:
+                self.save()
+            except OSError:
+                self.review_dirty = True
+                self.review_allow_removals |= allow_removals
+                self.review_upload_requested |= upload_requested
+                self.online["review_error"] = self.t("학습 기록 저장 실패", "Could not save review history")
+                return
+            self.refresh()
+            if upload_requested:
+                self.sync_async(force=True)
+
+        def failure(error):
+            self.review_query_in_flight = False
+            if not self.closed:
+                self.review_dirty = True
+                self.review_allow_removals |= allow_removals
+                self.review_upload_requested |= upload_requested
+                self.online["review_error"] = self.t("Anki 학습 기록을 읽지 못했습니다", "Could not read Anki review history")
+
+        try:
+            QueryOp(parent=mw, op=query, success=success).failure(failure).run_in_background()
+        except Exception as error:
+            failure(error)
 
     def t(self, korean, english):
         return english if self.locale == "en" else korean
@@ -486,8 +574,8 @@ class Controller:
     def discard_room_outbox(self, user_id, group_id):
         """Forget only snapshots belonging to a room the account has left."""
         removed = self.sync_outbox.discard_room(str(user_id), str(group_id))
-        if removed:
-            self.save()
+        self.review_history.invalidate_route(str(user_id), str(group_id))
+        self.save()
         return removed
 
     def sync_async(self, force=False):
@@ -509,6 +597,8 @@ class Controller:
         current = now()
         record = self.tracker.today(current)
         payloads = []
+        review_payloads = self.review_history.pending(auth["user_id"], group_id) if group else []
+        review_acks = []
         current_deck_name = (
             self.tracker.current_deck_name
             if self.online.get("share_deck_name", False) and self.tracker.status == "studying"
@@ -636,6 +726,18 @@ class Controller:
                     self.client.upsert_profile(token, auth["user_id"], display_name)
                 acknowledgements = []
                 first_error = None
+                for batch in review_payloads:
+                    try:
+                        self.client.sync_review_day(token, group_id=group_id, batch=batch)
+                        review_acks.append(batch)
+                    except SupabaseError as error:
+                        if error.status == 401:
+                            raise
+                        first_error = error
+                        break
+                    except Exception as error:
+                        first_error = error
+                        break
                 for queued in payloads:
                     try:
                         acknowledgement = self.client.record_device_day(
@@ -720,6 +822,8 @@ class Controller:
             try:
                 updated_auth, acknowledgements, members, sync_error = future.result()
                 self.online["auth"] = updated_auth
+                for batch in review_acks:
+                    self.review_history.acknowledge(auth["user_id"], group_id, batch)
                 for acknowledged_payload, acknowledged_revision in acknowledgements:
                     if isinstance(acknowledged_revision, DeviceSnapshotConflict):
                         baseline = recovery_baselines[acknowledged_payload["study_day"]]
@@ -816,3 +920,40 @@ gui_hooks.profile_will_close.append(profile_closing)
 gui_hooks.reviewer_did_show_question.append(show_question)
 gui_hooks.reviewer_did_answer_card.append(answer_card)
 gui_hooks.state_did_change.append(state_changed)
+
+
+def review_history_changed(changes, *args):
+    if controller is not None:
+        controller.review_dirty = True
+        # Anki has state_did_undo but no matching redo hook. Local card
+        # operations include redo; sync/reset observations must not erase or
+        # revive records merely because a different snapshot was downloaded.
+        if getattr(changes, "card", False) and not controller.review_syncing:
+            controller.review_allow_removals = True
+
+
+def review_sync_started():
+    if controller is not None:
+        controller.review_syncing = True
+        controller.review_allow_removals = False
+
+
+def review_sync_finished():
+    if controller is not None:
+        controller.review_syncing = False
+        controller.review_dirty = True
+        controller.review_upload_requested = True
+        controller.refresh_review_history()
+
+
+def review_undone(*args):
+    if controller is not None:
+        controller.review_allow_removals = True
+        controller.review_dirty = True
+        controller.review_upload_requested = True
+
+
+gui_hooks.operation_did_execute.append(review_history_changed)
+gui_hooks.sync_will_start.append(review_sync_started)
+gui_hooks.sync_did_finish.append(review_sync_finished)
+gui_hooks.state_did_undo.append(review_undone)

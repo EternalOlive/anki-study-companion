@@ -117,6 +117,9 @@ class FakeController:
     def sync_async(self, force=False):
         pass
 
+    def study_record(self, current):
+        return self.tracker.today(current)
+
 
 def main() -> int:
     QtGui, QtWidgets, StudyPanel, StudyTracker, timezone = _load_panel_types()
@@ -200,7 +203,8 @@ def main() -> int:
     assert online_row.dot.styleSheet() == ""
     assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
     assert panel.own_answers.accessibleName() == "60 / 100"
-    assert "24:10" in panel.own_title.toolTip()
+    assert "Anki 복습 기록" in panel.own_title.toolTip()
+    assert "모바일" in panel.own_title.toolTip()
     assert panel.time_caption.text() == "공부 시간"
     assert panel.answer_caption.text() == "답변"
     assert first_row.answers.text().isdigit()
@@ -255,7 +259,8 @@ def main() -> int:
 
     assert panel.member_order == original_order
     assert first_row.expanded and first_row.details.isVisible()
-    assert panel.own_title.text() == "You · all PCs"
+    assert panel.own_title.text() == "You · today"
+    assert "Anki review history" in panel.own_title.toolTip()
     assert first_row.details.text().startswith("영어::<단어>")
     assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
     assert panel.history_toggle.isChecked()

@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 from study_companion.online import DeviceSyncLedger, SupabaseError, DeviceSnapshotConflict
 from study_companion.outbox import SyncOutbox
+from study_companion.reviews import ReviewHistory
 
 
 class FakeClient:
@@ -29,6 +30,9 @@ class FakeClient:
 
     def set_current_deck(self, token, group_id, device_id, deck_name):
         self.deck_calls.append((group_id, device_id, deck_name))
+        return None
+
+    def sync_review_day(self, token, *, group_id, batch):
         return None
 
 
@@ -95,6 +99,7 @@ class OfflineSyncTests(unittest.TestCase):
             status="studying",
         )
         controller.sync_outbox = SyncOutbox({})
+        controller.review_history = ReviewHistory({})
         controller.sync_outbox.bind_route(
             user_id="user-a", group_id="room-a", device_id="device-a",
             study_day="2026-10-03", ledger_id="user-a|room-a",

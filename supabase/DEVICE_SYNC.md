@@ -1,5 +1,34 @@
 # Device sync activation
 
+## Native Anki review totals (2026-10-04)
+
+`migrations/20261004_synced_review_totals.sql` is now applied to production.
+Its rollback regression passed on the production database before deployment;
+all temporary users/rooms were rolled back. After commit, both tables, the
+authenticated upload permission, anonymous denial, and private event access
+were checked successfully.
+
+- `sync_review_day` stores review identities and milliseconds, deduplicated by
+  room/account/collection creation timestamp/review ID/card ID. No card content.
+- Native day markers switch that account/day's totals from the legacy device
+  sums to native events, including a genuinely empty day. Never add both.
+- `record_device_day` remains the source of live PC status and personal goals.
+- Client queries yesterday and today through Anki's serialized `QueryOp` queue
+  after startup, collection operations, and Anki sync. Yesterday covers a final
+  review not collected before closing at midnight; this is not full backfill.
+- Batches and exact acknowledgements persist locally, isolated by account/room.
+  New observations survive late callbacks. Same native events on two PCs do not
+  double count, while disjoint reviews do contribute.
+- Explicit observed PC undo/redo carries a monotonically increasing millisecond
+  change version. Stale snapshots cannot revive a tombstone. Clock skew across
+  PCs and remote/mobile undo reconciliation need further end-to-end testing.
+- A missing row after ordinary sync/backup restore does not delete server data.
+  Collection `crt` changes or separately copied/imported collections require
+  caution: the namespace is Anki's synced creation timestamp, not a new UUID.
+- Real mobile→AnkiWeb→PC end-to-end use has not yet been verified on a phone.
+
+The following describes the legacy activity totals and current presence channel.
+
 Apply `migrations/20261003_activate_device_sync.sql` as one transaction. It
 keeps accounts, rooms, memberships and old `daily_stats` rows, but new reads
 intentionally ignore those legacy totals. This is the accepted reset boundary.
