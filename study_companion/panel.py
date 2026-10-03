@@ -124,7 +124,7 @@ class ActivityTimeline(QWidget):
         if self.error and previous_buckets:
             self.buckets = previous_buckets
             self.known = True
-        self.setFixedHeight(max(94, self.fontMetrics().height() * 5) if self.buckets
+        self.setFixedHeight(max(88, self.fontMetrics().height() * 5) if self.buckets
                             else self.fontMetrics().height() + 8)
         if self.error and not self.buckets:
             self.selected_slot = None
@@ -219,7 +219,9 @@ class ActivityTimeline(QWidget):
         font.setPointSizeF(max(8.0, font.pointSizeF() * 0.85))
         painter.setFont(font)
         metrics = painter.fontMetrics()
-        label_y = max(metrics.ascent() + 2, self.height() - metrics.height() - 14)
+        # Reserve a text row with equal padding above and below its glyphs.
+        detail_top = self.height() - metrics.height() - 12
+        label_y = detail_top - 5
         baseline_y = max(15, label_y - metrics.height() - 4)
         bar_top = metrics.height() + 9
         bar_space = max(10, baseline_y - bar_top)
@@ -249,10 +251,11 @@ class ActivityTimeline(QWidget):
                 duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
                 answers = bucket["answer_count"]
                 detail = self.panel.tr(f"{duration} · {answers}회", f"{duration} · {answers} answers")
-                painter.drawLine(1, label_y + 5, self.width() - 1, label_y + 5)
+                painter.drawLine(1, detail_top, self.width() - 1, detail_top)
                 painter.setPen(foreground)
-                painter.drawText(1, self.height() - 5, period)
-                painter.drawText(self.width() - metrics.horizontalAdvance(detail) - 1, self.height() - 5, detail)
+                text_y = detail_top + 6 + metrics.ascent()
+                painter.drawText(1, text_y, period)
+                painter.drawText(self.width() - metrics.horizontalAdvance(detail) - 1, text_y, detail)
 
         if not self.known or not self.buckets:
             empty = self.panel.tr(
@@ -376,7 +379,7 @@ class MemberRow(QWidget):
         self.expanded = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 7, 0, 7)
+        layout.setContentsMargins(0, 5, 0, 5)
         layout.setSpacing(5)
 
         self.identity = QPushButton(self)
@@ -437,7 +440,7 @@ class MemberRow(QWidget):
 
         self.detail_body = QWidget(self)
         detail_layout = QVBoxLayout(self.detail_body)
-        detail_layout.setContentsMargins(18, 0, 0, 2)
+        detail_layout.setContentsMargins(18, 0, 0, 0)
         detail_layout.setSpacing(4)
         self.details = QLabel(self.detail_body)
         self.details.setTextFormat(Qt.TextFormat.PlainText)
@@ -605,8 +608,8 @@ class StudyPanel(QWidget):
         self.content = QWidget(self)
         root.addWidget(self.content, 1)
         outer = QVBoxLayout(self.content)
-        outer.setContentsMargins(14, 14, 14, 14)
-        outer.setSpacing(14)
+        outer.setContentsMargins(14, 10, 14, 10)
+        outer.setSpacing(8)
 
         self.expand_panel = PanelToggleButton(self, expand=True)
         self.expand_panel.clicked.connect(lambda: self._request_collapsed(False))

@@ -387,8 +387,8 @@ class SupabaseClient:
                 ) from error
             if "study group is full" in str(error).casefold():
                 raise SupabaseError(
-                    "방 인원이 가득 찼습니다. 한 방에는 방장을 포함해 최대 10명까지 참여할 수 있습니다. / "
-                    "This room is full. A room can have up to 10 people including the owner.",
+                    "방 인원이 가득 찼습니다. 한 방에는 방장을 포함해 최대 8명까지 참여할 수 있습니다. / "
+                    "This room is full. A room can have up to 8 people including the owner.",
                     status=409,
                 ) from error
             raise

@@ -77,8 +77,8 @@ class SupabaseClientTests(unittest.TestCase):
         with self.assertRaises(SupabaseError) as caught:
             SupabaseClient(opener=FakeOpener([error])).join_group("access", "ABCD")
         self.assertEqual(caught.exception.status, 409)
-        self.assertIn("최대 10명", str(caught.exception))
-        self.assertIn("up to 10 people", str(caught.exception))
+        self.assertIn("최대 8명", str(caught.exception))
+        self.assertIn("up to 8 people", str(caught.exception))
 
     def test_current_deck_is_bounded_and_can_be_cleared(self):
         opener = FakeOpener([None, None])

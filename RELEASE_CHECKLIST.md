@@ -9,8 +9,8 @@
 - [x] 방장 멤버 관리의 내보내기·차단 해제·방 전환 응답 무시 Qt 스모크 통과
 - [x] 방장 내보내기·재입장 차단 migration의 운영 PostgreSQL rollback 검증 및 적용. RLS·가입 차단 트리거·인증 사용자/익명 권한과 빈 차단 목록 확인
 - [x] 숨긴 패널의 친구 조회·렌더링 중지, 펼침 즉시 갱신, 오류 재시도 지연과 수동 우회 검사
-- [x] 방장 포함 10명 상한 migration의 운영 PostgreSQL rollback 검증 및 적용. 직렬화 잠금·10명 판정·기존 방 상한 준수 확인, 운영 최대 인원 5명
-- [x] `.ankiaddon` 12개 파일과 소스 SHA-256 일치 (`8e2bdb27a2227e25d49c69c9f8951332a7cd3f1e2ec6a77d484fba900c747e43`)
+- [x] 방장 포함 8명 상한 migration의 운영 PostgreSQL rollback 검증 및 적용. 직렬화 잠금·8명 판정·기존 방 상한 준수 확인, 운영 최대 인원 5명
+- [x] `.ankiaddon` 12개 파일과 소스 SHA-256 일치 (`9b92afa8266720ba4a2adf9486714ee5475987cfcdbe985dc055a7f507c47a5b`)
 - [x] 서버 보관 migration과 rollback 회귀 SQL의 실제 PostgreSQL 실행
 - [x] 서버 보관 migration 운영 적용과 첫 제한 배치 관찰 (`0일 / 0건`)
 - [ ] 자동 보관 예약: 운영 적용 후에도 별도 판단 전까지 비활성
