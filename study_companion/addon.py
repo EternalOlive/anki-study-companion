@@ -16,8 +16,6 @@ from aqt.qt import (
     QLabel,
     QHBoxLayout,
     QScrollArea,
-    QToolButton,
-    QStyle,
     QWidget,
     QObject,
     QTimer,
@@ -34,7 +32,7 @@ from .online import (
 )
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
 from .outbox import SyncOutbox
-from .panel import StudyPanel
+from .panel import PanelToggleButton, StudyPanel
 from .tracker import (
     StudyTracker,
     TIMEZONE,
@@ -253,9 +251,7 @@ class Controller:
         self.panel_scroll.setWidget(self.panel_body)
         self.panel.setWidget(self.panel_scroll)
         mw.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.panel)
-        self.panel_expand = QToolButton(mw)
-        self.panel_expand.setAutoRaise(True)
-        self.panel_expand.setIcon(mw.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
+        self.panel_expand = PanelToggleButton(mw, expand=True)
         self.panel_expand.clicked.connect(lambda: self.set_panel_collapsed(False))
         mw.statusBar().addPermanentWidget(self.panel_expand)
         self.panel_expand.hide()
@@ -512,6 +508,9 @@ class Controller:
         current = now()
         record = self.tracker.today(current)
         payloads = []
+        current_deck_name = (
+            self.tracker.current_deck_name if self.tracker.status == "studying" else None
+        )
         if group:
             study_day = current.date().isoformat()
             previous_route = self.sync_outbox.route(self.device_id)
@@ -651,6 +650,14 @@ class Controller:
                         if first_error is None:
                             first_error = error
                     except Exception as error:
+                        if first_error is None:
+                            first_error = error
+                if group:
+                    try:
+                        self.client.set_current_deck(token, group_id, self.device_id, current_deck_name)
+                    except SupabaseError as error:
+                        if error.status == 401:
+                            raise
                         if first_error is None:
                             first_error = error
                 members = self.client.fetch_group_today(token, group_id, study_day) if group else []

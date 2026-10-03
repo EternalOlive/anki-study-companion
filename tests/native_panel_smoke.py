@@ -56,6 +56,8 @@ def _load_panel_types():
     ):
         setattr(qt, name, getattr(QtWidgets, name))
     qt.Qt = QtCore.Qt
+    for name in ("QPainter", "QPalette", "QPen"):
+        setattr(qt, name, getattr(QtGui, name))
     sys.modules["aqt"] = aqt
     sys.modules["aqt.qt"] = qt
 
@@ -165,6 +167,20 @@ def main() -> int:
 
     first_key = panel.member_order[0]
     first_row = panel.member_rows[first_key]
+    friend = first_row.member
+    friend["current_deck_name"] = "영어::<단어>"
+    friend["deck_updated_at"] = current.isoformat()
+    panel.refresh()
+    assert "현재 덱  영어::<단어>" in first_row.details.text()
+    friend["deck_updated_at"] = (current - timedelta(seconds=100)).isoformat()
+    panel.refresh()
+    assert "<단어>" not in first_row.details.text()
+    friend["deck_updated_at"] = current.isoformat()
+    friend["status"] = "paused"
+    panel.refresh()
+    assert "공부 중 아님" in first_row.details.text()
+    friend["status"] = "studying"
+    panel.refresh()
     first_row.identity.click()
     panel.history_toggle.setChecked(True)
     app.processEvents()
@@ -208,6 +224,7 @@ def main() -> int:
     assert panel.member_order == original_order
     assert first_row.expanded and first_row.details.isVisible()
     assert panel.own_title.text() == "This PC · today"
+    assert "Current deck  영어::<단어>" in first_row.details.text()
     assert panel.own_time.text() == "24:10 / 60m"
     assert panel.history_toggle.isChecked()
     assert panel.collapse_panel.toolTip() == "Collapse panel"

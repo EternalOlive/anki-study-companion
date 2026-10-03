@@ -26,6 +26,9 @@ class FakeClient:
     def fetch_group_today(self, token, group_id, study_day):
         return []
 
+    def set_current_deck(self, token, group_id, device_id, deck_name):
+        return None
+
 
 class OfflineSyncTests(unittest.TestCase):
     @classmethod
@@ -71,6 +74,7 @@ class OfflineSyncTests(unittest.TestCase):
         }
         controller._access_token = lambda: "token"
         controller.tracker = SimpleNamespace(
+            current_deck_name="English",
             records={
                 "2026-10-03": {"seconds": 120, "answers": 8},
                 "2026-10-04": {"seconds": 10, "answers": 1},

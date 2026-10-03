@@ -30,6 +30,7 @@ class SyncStartTests(TestCase):
         self.controller.online = {'auth': {'user_id': 'u', 'access_token': 'token'},
                                   'group': {'id': 'room'}}
         self.controller.tracker = SimpleNamespace(
+            current_deck_name="English",
             today=lambda current: {'seconds': 10, 'answers': 2},
             time_goal_minutes=60, card_goal=100, status='studying')
         self.controller.device_id = 'device'

@@ -40,6 +40,14 @@ def headers_of(request):
 
 
 class SupabaseClientTests(unittest.TestCase):
+    def test_current_deck_is_bounded_and_can_be_cleared(self):
+        opener = FakeOpener([None, None])
+        client = SupabaseClient(opener=opener)
+        client.set_current_deck("access", "g1", "d1", "a" * 400)
+        client.set_current_deck("access", "g1", "d1", None)
+        self.assertEqual(len(body_of(opener.calls[0][0])["deck_name"]), 300)
+        self.assertIsNone(body_of(opener.calls[1][0])["deck_name"])
+
     def test_device_snapshot_uses_authenticated_rpc_without_client_user_or_time(self):
         saved = {"revision": 2, "active_seconds": 120, "answer_count": 8}
         opener = FakeOpener([[saved], [saved]])
@@ -167,12 +175,15 @@ class SupabaseClientTests(unittest.TestCase):
                 {"group_id": "g1", "user_id": "u2", "study_day": "2026-09-30", "answer_count": 7},
             ],
             [{"id": "u1", "display_name": "윤"}, {"id": "u2", "display_name": "친구"}],
+            [{"user_id": "u2", "current_deck_name": "English::Words"}],
         ])
         client = SupabaseClient(opener=opener)
 
         rows = client.fetch_group_today("access", "g1", "2026-09-30")
 
         self.assertEqual([row["display_name"] for row in rows], ["윤", "친구"])
+        self.assertEqual(rows[1]["current_deck_name"], "English::Words")
+        self.assertNotIn("current_deck_name", rows[0])
         membership_query = parse_qs(urlparse(opener.calls[0][0].full_url).query)
         stats_query = parse_qs(urlparse(opener.calls[1][0].full_url).query)
         profile_query = parse_qs(urlparse(opener.calls[2][0].full_url).query)
@@ -186,12 +197,13 @@ class SupabaseClientTests(unittest.TestCase):
             [{"user_id": "u1"}],
             [],
             [{"id": "u1", "display_name": "윤"}],
+            [],
         ])
         rows = SupabaseClient(opener=opener).fetch_group_today("access", "g1", "2026-09-30")
         self.assertEqual(rows[0]["display_name"], "윤")
         self.assertEqual(rows[0]["answer_count"], 0)
         self.assertEqual(rows[0]["status"], "stopped")
-        self.assertEqual(len(opener.calls), 3)
+        self.assertEqual(len(opener.calls), 4)
 
     def test_http_error_exposes_server_message_without_credentials(self):
         error = HTTPError(

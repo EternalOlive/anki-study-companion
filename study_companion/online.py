@@ -386,6 +386,14 @@ class SupabaseClient:
             )
         return stored
 
+    def set_current_deck(self, token: str, group_id: str, device_id: str,
+                         deck_name: str | None) -> None:
+        self._request(
+            "POST", "/rest/v1/rpc/set_current_deck", token=token,
+            body={"target_group": group_id, "source_device": device_id,
+                  "deck_name": deck_name[:300] if deck_name else None},
+        )
+
     def fetch_group_today(
         self, token: str, group_id: str, day: str
     ) -> list[dict[str, Any]]:
@@ -431,6 +439,16 @@ class SupabaseClient:
             ) or []
             names = {row["id"]: row["display_name"] for row in profiles}
 
+        try:
+            decks = self._request(
+                "POST", "/rest/v1/rpc/get_group_current_decks", token=token,
+                body={"target_group": group_id},
+            ) or []
+        except SupabaseError as error:
+            if error.status != 404:
+                raise
+            decks = []  # Older servers still show study totals.
+        decks_by_user = {row["user_id"]: row for row in decks}
         stats_by_user = {row["user_id"]: row for row in stats}
         merged = []
         for membership in memberships:
@@ -446,6 +464,7 @@ class SupabaseClient:
                 "status": "stopped",
             }
             item.update(stats_by_user.get(user_id, {}))
+            item.update(decks_by_user.get(user_id, {}))
             item["display_name"] = names.get(user_id)
             merged.append(item)
         return merged

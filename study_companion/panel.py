@@ -19,7 +19,9 @@ from aqt.qt import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QStyle,
+    QPainter,
+    QPalette,
+    QPen,
     QToolButton,
     Qt,
     QVBoxLayout,
@@ -47,6 +49,36 @@ def _allow_anywhere_wrap(value: str) -> str:
     """Give Qt wrap points inside unusually long unbroken display names."""
 
     return re.sub(r"\S{12,}", lambda match: "\u200b".join(match.group(0)), value)
+
+
+class PanelToggleButton(QToolButton):
+    """Theme-aware dock control with a persistent, keyboard-visible outline."""
+
+    def __init__(self, parent=None, *, expand=False):
+        super().__init__(parent)
+        self.expand = expand
+        self.setFixedSize(32, 32)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        foreground = self.palette().color(QPalette.ColorRole.WindowText)
+        background = self.palette().color(QPalette.ColorRole.Window)
+        painter.fillRect(self.rect(), background)
+        fill = self.palette().color(QPalette.ColorRole.WindowText)
+        fill.setAlpha(32 if self.isDown() else 20 if self.underMouse() else 8)
+        border = self.palette().color(QPalette.ColorRole.WindowText)
+        border.setAlpha(220 if self.hasFocus() else 100 if self.underMouse() else 65)
+        painter.setBrush(fill)
+        painter.setPen(QPen(border, 2 if self.hasFocus() else 1))
+        painter.drawRoundedRect(2, 2, 28, 28, 5, 5)
+        painter.setPen(QPen(foreground, 2, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        start, end = (18, 13) if self.expand else (13, 18)
+        painter.drawLine(start, 11, end, 16)
+        painter.drawLine(end, 16, start, 21)
 
 
 class MemberRow(QWidget):
@@ -119,6 +151,7 @@ class MemberRow(QWidget):
         layout.addLayout(self.summary)
 
         self.details = QLabel(self)
+        self.details.setTextFormat(Qt.TextFormat.PlainText)
         self.details.setWordWrap(True)
         self.details.setContentsMargins(18, 0, 0, 2)
         self.details.hide()
@@ -172,8 +205,8 @@ class MemberRow(QWidget):
         self.identity.setToolTip(f"{name} · {status_text}")
         self.identity.setAccessibleName(
             self.panel.tr(
-                f"{name}, {status_text}. 목표와 마지막 기록 보기",
-                f"{name}, {status_text}. Show goals and last update",
+                f"{name}, {status_text}. 공부 중인 덱과 목표 보기",
+                f"{name}, {status_text}. Show current deck and goals",
             )
         )
 
@@ -203,10 +236,24 @@ class MemberRow(QWidget):
             else self.panel.tr("목표 없음", "No goal")
         )
         updated_text = self.panel.updated_time(member.get("updated_at"))
+        deck_name = None
+        if status == "studying" and member.get("current_deck_name"):
+            try:
+                stamp = datetime.fromisoformat(member["deck_updated_at"].replace("Z", "+00:00"))
+                if 0 <= (_now() - stamp).total_seconds() <= 90:
+                    deck_name = _allow_anywhere_wrap(str(member["current_deck_name"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+        deck_text = deck_name or self.panel.tr(
+            "정보 없음" if status == "studying" else "공부 중 아님",
+            "Not available" if status == "studying" else "Not studying",
+        )
         self.details.setText(
             self.panel.tr(
+                f"현재 덱  {deck_text}\n"
                 f"시간 목표  {time_goal_text}    답변 목표  {answer_goal_text}\n"
                 f"마지막 기록  {updated_text}",
+                f"Current deck  {deck_text}\n"
                 f"Time goal  {time_goal_text}    Answer goal  {answer_goal_text}\n"
                 f"Last update  {updated_text}",
             )
@@ -245,11 +292,7 @@ class StudyPanel(QWidget):
         outer.setContentsMargins(14, 14, 14, 14)
         outer.setSpacing(14)
 
-        self.expand_panel = QToolButton(self)
-        self.expand_panel.setAutoRaise(True)
-        self.expand_panel.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)
-        )
+        self.expand_panel = PanelToggleButton(self, expand=True)
         self.expand_panel.clicked.connect(lambda: self._request_collapsed(False))
         self.expand_panel.hide()
         root.addWidget(self.expand_panel, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -274,11 +317,7 @@ class StudyPanel(QWidget):
         self.manage.setFlat(True)
         self.manage.clicked.connect(self.controller.show_dialog)
         header.addWidget(self.manage)
-        self.collapse_panel = QToolButton(self)
-        self.collapse_panel.setAutoRaise(True)
-        self.collapse_panel.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
-        )
+        self.collapse_panel = PanelToggleButton(self)
         self.collapse_panel.clicked.connect(lambda: self._request_collapsed(True))
         header.addWidget(self.collapse_panel)
         outer.addLayout(header)
