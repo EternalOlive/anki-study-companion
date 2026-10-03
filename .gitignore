@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+
+.omx/
+backups/
+artifacts/
+
+*.zip
+.pytest_cache/
+.coverage
+htmlcov/
