@@ -887,8 +887,8 @@ class SettingsDialog(QDialog):
                 self._set_message(
                     self.email_error,
                     self._t(
-                        "확인 메일을 보냈습니다. 링크를 연 뒤 비밀번호를 설정하세요.",
-                        "Verification email sent. Open the link, then set a password.",
+                        "서버가 인증 메일 요청을 접수했습니다. 받은 메일의 링크를 연 뒤 비밀번호를 설정하세요. 메일이 없으면 스팸함과 발송 설정을 확인해 주세요.",
+                        "The server accepted the email request. Open the link in your inbox, then set a password. If it does not arrive, check spam and email delivery settings.",
                     ),
                 )
                 self.new_password.setFocus()
@@ -923,7 +923,9 @@ class SettingsDialog(QDialog):
 
         def operation(token):
             user = self.controller.client.get_user(token)
-            if user.get("is_anonymous", True):
+            if (user.get("is_anonymous", True)
+                    or not user.get("email_confirmed_at")
+                    or (user.get("email") or "").casefold() != pending_address.casefold()):
                 raise SupabaseError(
                     self._t(
                         "먼저 이메일의 확인 링크를 열어 주세요.",

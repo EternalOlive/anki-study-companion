@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import platform
+import uuid
+from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -23,6 +27,161 @@ class SupabaseError(RuntimeError):
     def __init__(self, message: str, *, status: int | None = None):
         super().__init__(message)
         self.status = status
+
+
+def load_or_create_device_id(path: Path, machine_marker: str | None = None) -> str:
+    """Return an opaque installation ID that is not part of Anki profile sync.
+
+    The marker is stored only as a hash. If an Anki data directory is copied to
+    another computer, the copied installation ID is replaced instead of making
+    both computers overwrite the same device row.
+    """
+    if machine_marker is None:
+        raw_marker = f"{platform.node()}:{uuid.getnode()}"
+        machine_marker = hashlib.sha256(raw_marker.encode("utf-8")).hexdigest()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        candidate = str(payload.get("device_id") or "")
+        uuid.UUID(candidate)
+        if payload.get("machine_marker") == machine_marker:
+            return candidate
+    except (FileNotFoundError, OSError, ValueError, TypeError, json.JSONDecodeError):
+        pass
+
+    device_id = str(uuid.uuid4())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps({"device_id": device_id, "machine_marker": machine_marker}),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+    return device_id
+
+
+def profile_device_id(installation_id: str, profile_path: Path) -> str:
+    """Namespace one server device stream per local Anki profile."""
+    namespace = uuid.UUID(installation_id)
+    local_profile = str(profile_path.resolve()).casefold()
+    return str(uuid.uuid5(namespace, local_profile))
+
+
+class DeviceSyncLedger:
+    """Maintain per-account monotonic snapshots for this installation."""
+
+    def __init__(self, state: dict[str, Any]):
+        self.state = state
+        self.state.setdefault("accounts", {})
+
+    def bind_device(self, device_id: str) -> None:
+        """Reset copied per-device counters when this is a new installation."""
+        previous = self.state.get("installation_id")
+        if previous and previous != device_id:
+            self.state.clear()
+            self.state["accounts"] = {}
+            self.state["baseline_on_next_activation"] = True
+        self.state["installation_id"] = device_id
+
+    def activate(
+        self, user_id: str, day: str, active_seconds: int, answer_count: int
+    ) -> None:
+        active_user = self.state.get("active_user")
+        active_day = self.state.get("active_day")
+        if active_user == user_id and active_day == day:
+            return
+        if active_user and active_day == day:
+            self._advance(active_user, day, active_seconds, answer_count)
+
+        accounts = self.state["accounts"]
+        first_account = not accounts
+        baseline_existing = bool(self.state.get("baseline_on_next_activation"))
+        include_existing = (first_account and not baseline_existing) or active_user == user_id
+        target = accounts.setdefault(user_id, {}).setdefault(
+            day,
+            {
+                "seconds_total": 0,
+                "answers_total": 0,
+                "segment_seconds": 0 if include_existing else int(active_seconds),
+                "segment_answers": 0 if include_existing else int(answer_count),
+                "revision": 0,
+                "acknowledged_revision": 0,
+            },
+        )
+        # Returning to an account begins a new segment at the current local
+        # totals, so study performed while another account was active is excluded.
+        if not include_existing and (active_user or active_day):
+            target["segment_seconds"] = int(active_seconds)
+            target["segment_answers"] = int(answer_count)
+        self.state["active_user"] = user_id
+        self.state["active_day"] = day
+        self.state.pop("baseline_on_next_activation", None)
+
+    def prepare(
+        self,
+        *,
+        user_id: str,
+        day: str,
+        active_seconds: int,
+        answer_count: int,
+        time_goal_minutes: int,
+        card_goal: int,
+        status: str,
+    ) -> dict[str, Any]:
+        self.activate(user_id, day, active_seconds, answer_count)
+        day_state = self._advance(user_id, day, active_seconds, answer_count)
+        signature = [
+            int(day_state["seconds_total"]),
+            int(day_state["answers_total"]),
+            int(time_goal_minutes),
+            int(card_goal),
+            status,
+        ]
+        if (
+            day_state.get("signature") != signature
+            or int(day_state.get("revision", 0))
+            == int(day_state.get("acknowledged_revision", 0))
+        ):
+            day_state["revision"] = int(day_state.get("revision", 0)) + 1
+            day_state["signature"] = signature
+        return {
+            "revision": int(day_state["revision"]),
+            "active_seconds": signature[0],
+            "answer_count": signature[1],
+            "time_goal_minutes": signature[2],
+            "card_goal": signature[3],
+            "status": signature[4],
+        }
+
+    def acknowledge(self, user_id: str, day: str, revision: int) -> None:
+        day_state = self.state.get("accounts", {}).get(user_id, {}).get(day)
+        if day_state and int(day_state.get("revision", 0)) == int(revision):
+            day_state["acknowledged_revision"] = int(revision)
+
+    def _advance(
+        self, user_id: str, day: str, active_seconds: int, answer_count: int
+    ) -> dict[str, Any]:
+        day_state = self.state["accounts"].setdefault(user_id, {}).setdefault(
+            day,
+            {
+                "seconds_total": 0,
+                "answers_total": 0,
+                "segment_seconds": int(active_seconds),
+                "segment_answers": int(answer_count),
+                "revision": 0,
+                "acknowledged_revision": 0,
+            },
+        )
+        seconds = int(active_seconds)
+        answers = int(answer_count)
+        day_state["seconds_total"] = int(day_state.get("seconds_total", 0)) + max(
+            0, seconds - int(day_state.get("segment_seconds", seconds))
+        )
+        day_state["answers_total"] = int(day_state.get("answers_total", 0)) + max(
+            0, answers - int(day_state.get("segment_answers", answers))
+        )
+        day_state["segment_seconds"] = seconds
+        day_state["segment_answers"] = answers
+        return day_state
 
 
 class SupabaseClient:
@@ -149,6 +308,46 @@ class SupabaseClient:
         )
         return result or []
 
+    def record_device_day(
+        self, token: str, *, group_id: str, device_id: str, study_day: str,
+        revision: int, active_seconds: int, answer_count: int, status: str,
+        time_goal_minutes: int | None = None, card_goal: int | None = None,
+    ) -> dict[str, Any]:
+        """Store one idempotent cumulative snapshot for this installation.
+
+        Persist a revision before sending, reuse it for retries, and increase it
+        for new snapshots (including presence changes). The server owns user ID
+        and receipt time. Never send group/server totals as device counters.
+        """
+        body = {
+            "target_group": group_id,
+            "source_device": device_id,
+            "target_day": study_day,
+            "snapshot_revision": revision,
+            "seconds_total": active_seconds,
+            "answers_total": answer_count,
+            "activity_status": status,
+        }
+        if time_goal_minutes is not None:
+            body["time_goal"] = int(time_goal_minutes)
+        if card_goal is not None:
+            body["cards_goal"] = int(card_goal)
+        try:
+            result = self._request(
+                "POST", "/rest/v1/rpc/record_device_day", token=token, body=body
+            )
+        except SupabaseError as error:
+            if error.status == 404:
+                raise SupabaseError(
+                    "서버의 기기별 동기화 업데이트가 아직 적용되지 않았습니다.",
+                    status=404,
+                ) from error
+            raise
+        stored = self._first(result)
+        if not isinstance(stored, dict) or not stored:
+            raise SupabaseError("기기별 기록 저장 결과를 확인할 수 없습니다")
+        return stored
+
     def fetch_group_today(
         self, token: str, group_id: str, day: str
     ) -> list[dict[str, Any]]:
@@ -162,20 +361,24 @@ class SupabaseClient:
                 "order": "joined_at.asc",
             },
         ) or []
-        stats = self._request(
-            "GET",
-            "/rest/v1/daily_stats",
-            token=token,
-            query={
-                "select": (
-                    "group_id,user_id,study_day,active_seconds,answer_count,"
-                    "time_goal_minutes,card_goal,status,updated_at"
-                ),
-                "group_id": f"eq.{group_id}",
-                "study_day": f"eq.{day}",
-                "order": "updated_at.desc",
-            },
-        ) or []
+        try:
+            stats = self._request(
+                "POST",
+                "/rest/v1/rpc/get_group_device_stats",
+                token=token,
+                query={
+                    "group_id": f"eq.{group_id}",
+                    "study_day": f"eq.{day}",
+                },
+                body={"target_group": group_id, "target_day": day},
+            ) or []
+        except SupabaseError as error:
+            if error.status == 404:
+                raise SupabaseError(
+                    "서버의 기기별 동기화 업데이트가 아직 적용되지 않았습니다.",
+                    status=404,
+                ) from error
+            raise
         user_ids = list(dict.fromkeys(row["user_id"] for row in memberships))
         names: dict[str, str] = {}
         if user_ids:

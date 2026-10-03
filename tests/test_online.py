@@ -40,6 +40,35 @@ def headers_of(request):
 
 
 class SupabaseClientTests(unittest.TestCase):
+    def test_device_snapshot_uses_authenticated_rpc_without_client_user_or_time(self):
+        saved = {"revision": 2, "active_seconds": 120, "answer_count": 8}
+        opener = FakeOpener([[saved], [saved]])
+        client = SupabaseClient(opener=opener)
+        snapshot = dict(group_id="g1", device_id="d1", study_day="2026-10-03",
+                        revision=2, active_seconds=120, answer_count=8, status="paused")
+        self.assertEqual(client.record_device_day("access", **snapshot), saved)
+        self.assertEqual(client.record_device_day("access", **snapshot), saved)
+        first, retry = [call[0] for call in opener.calls]
+        self.assertTrue(first.full_url.endswith("/rest/v1/rpc/record_device_day"))
+        self.assertEqual(first.get_method(), "POST")
+        self.assertEqual(headers_of(first)["authorization"], "Bearer access")
+        self.assertEqual(body_of(first), {
+            "target_group": "g1", "source_device": "d1", "target_day": "2026-10-03",
+            "snapshot_revision": 2, "seconds_total": 120, "answers_total": 8,
+            "activity_status": "paused",
+        })
+        self.assertEqual(first.data, retry.data)
+
+    def test_device_snapshot_requires_a_storage_acknowledgement(self):
+        for response in (None, [], {}, "invalid"):
+            with self.subTest(response=response):
+                client = SupabaseClient(opener=FakeOpener([response]))
+                with self.assertRaises(SupabaseError):
+                    client.record_device_day(
+                        "access", group_id="g", device_id="d", study_day="2026-10-03",
+                        revision=1, active_seconds=0, answer_count=0, status="stopped",
+                    )
+
     def test_auth_requests_use_expected_endpoints_headers_and_payloads(self):
         opener = FakeOpener([
             {"user": {"id": "u1"}},

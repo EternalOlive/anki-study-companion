@@ -207,7 +207,7 @@ def main() -> int:
 
     assert panel.member_order == original_order
     assert first_row.expanded and first_row.details.isVisible()
-    assert panel.own_title.text() == "You · today"
+    assert panel.own_title.text() == "This PC · today"
     assert panel.own_time.text() == "24:10 / 60m"
     assert panel.history_toggle.isChecked()
     assert panel.collapse_panel.toolTip() == "Collapse panel"

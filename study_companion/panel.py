@@ -590,7 +590,16 @@ class StudyPanel(QWidget):
         self.manage.setText(self.tr("관리", "Manage"))
         self.manage.setAccessibleName(self.tr("스터디방 관리", "Manage study room"))
 
-        self.own_title.setText(self.tr("나 · 오늘", "You · today"))
+        self.own_title.setText(self.tr("이 PC · 오늘", "This PC · today"))
+        my_total = next((member for member in (raw_members or [])
+                         if member.get("user_id") == my_id
+                         and member.get("study_day") == current.date().isoformat()), None)
+        self.own_title.setToolTip(
+            self.tr(
+                f"모든 PC 합계: {self.format_duration(int(my_total.get('active_seconds') or 0))} · {int(my_total.get('answer_count') or 0)}회",
+                f"All PCs: {self.format_duration(int(my_total.get('active_seconds') or 0))} · {int(my_total.get('answer_count') or 0)} answers",
+            ) if my_total else ""
+        )
         own_status = self.status_text(
             "online" if tracker.status == "stopped" else tracker.status
         )

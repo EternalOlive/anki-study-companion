@@ -443,6 +443,29 @@ def render_screenshots(app, QtGui, QtWidgets, SettingsDialog):
     return artifacts
 
 
+def check_email_confirmation(SettingsDialog, SupabaseError):
+    for user, allowed in (
+        ({"is_anonymous": True}, False),
+        ({"is_anonymous": False, "email": "reader@example.com"}, False),
+        ({"is_anonymous": False, "email": "other@example.com", "email_confirmed_at": "2026-10-03"}, False),
+        ({"is_anonymous": False, "email": "reader@example.com", "email_confirmed_at": "2026-10-03"}, True),
+    ):
+        controller = FakeController()
+        controller.online["pending_email"] = "reader@example.com"
+        controller.client.get_user = lambda token, value=user: value
+        dialog = _fresh_dialog(SettingsDialog, controller)
+        dialog.new_password.setText("test-password")
+        dialog.finish_email_link()
+        try:
+            controller.finish_remote()
+            assert allowed, "unconfirmed/wrong email was linked"
+            assert controller.online["account_kind"] == "email"
+        except SupabaseError:
+            assert not allowed
+            assert not any(call[0] == "update_user" for call in controller.client.calls)
+        dialog.close()
+
+
 def main():
     QtGui, QtWidgets, SettingsDialog, SupabaseError = _load_settings_types()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -459,6 +482,7 @@ def main():
     check_home_draft_and_save(app, QtWidgets, SettingsDialog)
     check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
     check_account_states(app, SettingsDialog)
+    check_email_confirmation(SettingsDialog, SupabaseError)
     screenshots = render_screenshots(app, QtGui, QtWidgets, SettingsDialog)
     print("native settings smoke ok")
     for screenshot in screenshots:

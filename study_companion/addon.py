@@ -20,7 +20,13 @@ from aqt.qt import (
 )
 from aqt.utils import showWarning
 
-from .online import SupabaseClient, SupabaseError
+from .online import (
+    DeviceSyncLedger,
+    SupabaseClient,
+    SupabaseError,
+    load_or_create_device_id,
+    profile_device_id,
+)
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
 from .panel import StudyPanel
 from .tracker import (
@@ -75,6 +81,21 @@ class Controller:
             card_goal=data.get("card_goal", 0),
         )
         self.online = data.get("online", {})
+        device_path = self.path.parent.parent / "study_companion-device.json"
+        try:
+            installation_id = load_or_create_device_id(device_path)
+        except OSError:
+            # A read-only Anki data directory is unusual, but keeping a stable
+            # fallback in this add-on's local state is safer than disabling sync.
+            import uuid
+            installation_id = self.online.setdefault(
+                "installation_id", str(uuid.uuid4())
+            )
+        self.device_id = profile_device_id(installation_id, self.path.parent)
+        self.device_ledger = DeviceSyncLedger(
+            self.online.setdefault("device_sync", {})
+        )
+        self.device_ledger.bind_device(self.device_id)
         self.locale = data.get("language", "ko" if lang.current_lang.startswith("ko") else "en")
         if self.locale not in ("ko", "en"):
             self.locale = "ko"
@@ -418,6 +439,13 @@ class Controller:
     def _store_session(self, result, email, display_name):
         user = result.get("user") or {}
         user_id = user.get("id") or result.get("user_id")
+        record = self.tracker.today(now())
+        self.device_ledger.activate(
+            user_id,
+            now().date().isoformat(),
+            int(record["seconds"]),
+            int(record["answers"]),
+        )
         self.online.update(
             {
                 "email": email,
@@ -446,20 +474,29 @@ class Controller:
         display_name = canonical_nickname(auth["user_id"])
         update_name = self.online.get("display_name") != display_name
         group = dict(self.online.get("group") or {})
+        group_id = group.get("id")
         record = self.tracker.today(now())
         payload = None
         if group:
+            study_day = now().date().isoformat()
+            device_snapshot = self.device_ledger.prepare(
+                user_id=auth["user_id"],
+                day=study_day,
+                active_seconds=int(record["seconds"]),
+                answer_count=int(record["answers"]),
+                time_goal_minutes=self.tracker.time_goal_minutes,
+                card_goal=self.tracker.card_goal,
+                status=self.tracker.status,
+            )
             payload = {
                 "group_id": group["id"],
-                "user_id": auth["user_id"],
-                "study_day": now().date().isoformat(),
-                "active_seconds": int(record["seconds"]),
-                "answer_count": record["answers"],
-                "time_goal_minutes": self.tracker.time_goal_minutes,
-                "card_goal": self.tracker.card_goal,
-                "status": self.tracker.status,
-                "updated_at": now().isoformat(),
+                "device_id": self.device_id,
+                "study_day": study_day,
+                **device_snapshot,
             }
+            # The revision and its exact cumulative snapshot must survive a
+            # crash before the request; retries then remain idempotent.
+            self.save()
 
         def task():
             if auth.get("refresh_token") and time.time() >= auth.get("expires_at", 0) - 60:
@@ -485,14 +522,28 @@ class Controller:
                 if update_name:
                     self.client.upsert_profile(token, auth["user_id"], display_name)
                 if payload is None:
-                    return []
-                self.client.upsert_daily_stats(token, [payload])
-                return self.client.fetch_group_today(token, group["id"], payload["study_day"])
+                    return None, []
+                acknowledgement = self.client.record_device_day(
+                    token,
+                    group_id=payload["group_id"],
+                    device_id=payload["device_id"],
+                    study_day=payload["study_day"],
+                    revision=payload["revision"],
+                    active_seconds=payload["active_seconds"],
+                    answer_count=payload["answer_count"],
+                    time_goal_minutes=payload["time_goal_minutes"],
+                    card_goal=payload["card_goal"],
+                    status=payload["status"],
+                )
+                members = self.client.fetch_group_today(
+                    token, group["id"], payload["study_day"]
+                )
+                return acknowledgement, members
             try:
-                members = upload(token)
+                acknowledgement, members = upload(token)
             except SupabaseError as error:
                 if error.status != 401 or not auth.get("refresh_token"):
-                    return auth, None, error
+                    return auth, None, None, error
                 try:
                     refreshed = self.client.refresh(auth["refresh_token"])
                     auth.update(
@@ -508,24 +559,33 @@ class Controller:
                         }
                     )
                     token = auth["access_token"]
-                    members = upload(token)
+                    acknowledgement, members = upload(token)
                 except SupabaseError as refresh_error:
                     if refresh_error.status in (400, 401):
                         refresh_error = SupabaseError("로그인이 만료되었습니다.", status=401)
-                    return auth, None, refresh_error
+                    return auth, None, None, refresh_error
             except Exception as error:
-                return auth, None, error
-            return auth, members, None
+                return auth, None, None, error
+            return auth, acknowledgement, members, None
 
         def done(future):
             self.sync_in_flight = False
-            if self.closed or self.online.get("auth", {}).get("user_id") != auth["user_id"]:
+            current_group_id = (self.online.get("group") or {}).get("id")
+            if (
+                self.closed
+                or self.online.get("auth", {}).get("user_id") != auth["user_id"]
+                or current_group_id != group_id
+            ):
                 return
             try:
-                updated_auth, members, sync_error = future.result()
+                updated_auth, acknowledgement, members, sync_error = future.result()
                 self.online["auth"] = updated_auth
                 if sync_error is not None:
                     raise sync_error
+                if payload is not None and acknowledgement is not None:
+                    self.device_ledger.acknowledge(
+                        auth["user_id"], payload["study_day"], payload["revision"]
+                    )
                 self.online["display_name"] = display_name
                 self.online["members"] = members
                 self.online.pop("last_error", None)
