@@ -246,7 +246,11 @@ def main() -> int:
     assert panel.weekly_bars.isVisible()
     assert len(panel.weekly_days) == 7
     assert "오늘 진행 중" in panel.weekly_days[-1].accessibleName()
-    assert "이전 7일보다" in panel.weekly_summary.text()
+    assert "이전 7일보다" in panel.weekly_summary.toolTip()
+    assert "\n" not in panel.weekly_summary.text()
+    assert not panel.deck_history_body.isVisible()
+    panel.deck_history_title.click()
+    assert panel.deck_history_body.isVisible()
     assert len(panel.member_rows) == 2
     assert first_row.dot.text() == "●" and first_row.dot.isVisible()
     online_row = panel.member_rows["friend-b"]
@@ -310,7 +314,8 @@ def main() -> int:
     panel.weekly_days[-1].setFocus()
     QTest.keyClick(panel.weekly_days[-1], Qt.Key.Key_Space)
     assert panel.weekly_day_detail.isVisible()
-    assert "오늘 진행 중" in panel.weekly_day_detail.text()
+    assert "48회" in panel.weekly_day_detail.text()
+    assert "오늘 진행 중" in panel.weekly_days[-1].accessibleName()
     assert "마지막 확인" in panel.weekly_summary.toolTip()
     numeric_point = first_row.time.geometry().center()
     QTest.mouseClick(first_row.identity, Qt.MouseButton.LeftButton, pos=numeric_point)
@@ -407,8 +412,10 @@ def main() -> int:
     app.processEvents()
     assert large._own_compact
     assert large_row._compact
-    assert large.member_scroll.horizontalScrollBar().maximum() == 0
-    assert large.member_body.width() <= large.member_scroll.viewport().width()
+    assert large.member_body.width() <= large.content.width()
+    assert large_row.compact_metrics.isVisible()
+    assert "회" in large_row.compact_metrics.text()
+    assert not large_row.time.isVisible()
     assert large_row.identity.toolTip().startswith("아침마다도서관")
     assert large.own_time.geometry().right() <= large.content.width()
     assert large.own_answers.geometry().right() <= large.content.width()
@@ -427,6 +434,7 @@ def main() -> int:
     outer_scroll.setWidget(large)
     outer_scroll.resize(300, 650)
     outer_scroll.show()
+    large.deck_history_title.setChecked(True)
     app.processEvents()
     assert outer_scroll.verticalScrollBar().maximum() > 0
     outer_scroll.ensureWidgetVisible(large.history_summary)
@@ -446,8 +454,8 @@ def main() -> int:
     app.processEvents()
     large_row = large.member_rows["friend-a"]
     assert large_row._compact
-    assert large.member_scroll.horizontalScrollBar().maximum() == 0
-    assert large.member_body.width() <= large.member_scroll.viewport().width()
+    assert large.member_body.width() <= large.content.width()
+    assert "answers" in large_row.compact_metrics.text()
     assert large_row.identity.toolTip().startswith("FriendWith")
     assert "\u200b" in large_row.identity_text.text()
 

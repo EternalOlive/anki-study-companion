@@ -418,6 +418,9 @@ class MemberRow(QWidget):
         )
         self.summary.addWidget(self.answers, 0, 3)
         self.summary.setColumnStretch(1, 1)
+        self.compact_metrics = QLabel(self.identity)
+        self.compact_metrics.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.compact_metrics.hide()
         for label in (self.dot, self.time, self.answers):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.identity)
@@ -450,6 +453,10 @@ class MemberRow(QWidget):
         self._set_compact(compact)
 
     def _set_compact(self, compact: bool) -> None:
+        rows = getattr(self.panel, "member_rows", {})
+        show_columns = not compact and not any(row._compact for row in rows.values() if row is not self)
+        self.panel.time_column.setVisible(show_columns)
+        self.panel.answer_column.setVisible(show_columns)
         if compact == self._compact:
             return
         self._compact = compact
@@ -457,11 +464,14 @@ class MemberRow(QWidget):
         self.summary.removeWidget(self.identity_text)
         self.summary.removeWidget(self.time)
         self.summary.removeWidget(self.answers)
+        self.summary.removeWidget(self.compact_metrics)
+        self.time.setVisible(not compact)
+        self.answers.setVisible(not compact)
+        self.compact_metrics.setVisible(compact)
         if compact:
             self.summary.addWidget(self.dot, 0, 0)
             self.summary.addWidget(self.identity_text, 0, 1, 1, 3)
-            self.summary.addWidget(self.time, 1, 2)
-            self.summary.addWidget(self.answers, 1, 3)
+            self.summary.addWidget(self.compact_metrics, 1, 1, 1, 3)
         else:
             self.summary.addWidget(self.dot, 0, 0)
             self.summary.addWidget(self.identity_text, 0, 1)
@@ -472,6 +482,7 @@ class MemberRow(QWidget):
         self.expanded = not self.expanded
         self.identity.setChecked(self.expanded)
         self.detail_body.setVisible(self.expanded)
+        self.update_member(self.member)
 
     def update_member(self, member: dict) -> None:
         self.member = member
@@ -485,7 +496,7 @@ class MemberRow(QWidget):
             updated = self.panel.updated_time(member.get("updated_at"))
             status_text = self.panel.tr(f"갱신 {updated}", f"Updated {updated}")
         self.identity_text.setText(
-            f"{_allow_anywhere_wrap(name)}  ·  {status_text}"
+            f"{_allow_anywhere_wrap(name)}  ·  {status_text}  {'-' if self.expanded else '+'}"
         )
         self.identity.setToolTip(f"{name} · {status_text}")
         self.panel.update_status_dot(self.dot, status)
@@ -494,6 +505,10 @@ class MemberRow(QWidget):
         answers = max(0, int(member.get("answer_count") or 0))
         self.time.setText(self.panel.format_duration(seconds) if member.get("active_seconds") is not None else "—")
         self.answers.setText(str(answers) if member.get("answer_count") is not None else "—")
+        self.compact_metrics.setText(self.panel.tr(
+            f"{self.time.text()} · {self.answers.text()}회",
+            f"{self.time.text()} · {self.answers.text()} answers",
+        ))
         self.time.setAccessibleName(
             self.panel.tr(f"공부 시간 {self.time.text()}", f"Study time {self.time.text()}")
         )
@@ -589,6 +604,7 @@ class StudyPanel(QWidget):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         _set_font(self.room_name, scale=1.1, bold=True)
+        self.room_name.setMaximumHeight(self.room_name.fontMetrics().lineSpacing() * 2)
         self.room_presence = QLabel(self)
         self.room_presence.setWordWrap(True)
         header_text.addWidget(self.room_name)
@@ -668,22 +684,12 @@ class StudyPanel(QWidget):
         self.member_empty.setWordWrap(True)
         outer.addWidget(self.member_empty)
 
-        self.member_scroll = QScrollArea(self)
-        self.member_scroll.setWidgetResizable(True)
-        self.member_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.member_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self.member_scroll.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
-        )
-        self.member_body = QWidget(self.member_scroll)
+        self.member_body = QWidget(self)
         self.member_layout = QVBoxLayout(self.member_body)
         self.member_layout.setContentsMargins(0, 0, 0, 0)
         self.member_layout.setSpacing(0)
         self.member_layout.addStretch()
-        self.member_scroll.setWidget(self.member_body)
-        outer.addWidget(self.member_scroll, 1)
+        outer.addWidget(self.member_body)
 
         outer.addWidget(self._separator())
 
@@ -691,7 +697,7 @@ class StudyPanel(QWidget):
         self.history_toggle.setFlat(True)
         self.history_toggle.setCheckable(True)
         self.history_toggle.setStyleSheet(
-            "QPushButton { text-align: left; padding: 4px 0; font-weight: bold; }"
+            "QPushButton { text-align: left; padding: 4px 0; font-weight: bold; border: none; background: transparent; }"
         )
         self.history_toggle.toggled.connect(self._toggle_history)
         outer.addWidget(self.history_toggle)
@@ -722,9 +728,17 @@ class StudyPanel(QWidget):
         self.weekly_summary = QLabel(self.history_body)
         self.weekly_summary.setWordWrap(True)
         history_layout.addWidget(self.weekly_summary)
-        self.deck_history_title = QLabel(self.history_body)
-        _set_font(self.deck_history_title, bold=True)
+        self.deck_history_title = QPushButton(self.history_body)
+        self.deck_history_title.setCheckable(True)
+        self.deck_history_title.setFlat(True)
+        self.deck_history_title.setStyleSheet(self.history_toggle.styleSheet())
         history_layout.addWidget(self.deck_history_title)
+        self.deck_history_body = QWidget(self.history_body)
+        deck_layout = QVBoxLayout(self.deck_history_body)
+        deck_layout.setContentsMargins(0, 0, 0, 0)
+        self.deck_history_body.hide()
+        self.deck_history_title.toggled.connect(self._toggle_deck_history)
+        history_layout.addWidget(self.deck_history_body)
         self.history_selector = QGridLayout()
         self.history_selector.setContentsMargins(0, 0, 0, 0)
         self.history_selector.setHorizontalSpacing(8)
@@ -742,11 +756,11 @@ class StudyPanel(QWidget):
         self.yesterday.setChecked(True)
         self.yesterday.clicked.connect(lambda: self._set_history_mode("yesterday"))
         self.best.clicked.connect(lambda: self._set_history_mode("best"))
-        history_layout.addLayout(self.history_selector)
+        deck_layout.addLayout(self.history_selector)
         self._history_compact = False
         self.history_summary = QLabel(self.history_body)
         self.history_summary.setWordWrap(True)
-        history_layout.addWidget(self.history_summary)
+        deck_layout.addWidget(self.history_summary)
         self.history_body.hide()
         outer.addWidget(self.history_body)
 
@@ -761,6 +775,7 @@ class StudyPanel(QWidget):
         error_layout.addWidget(self.retry)
         self.error_box.hide()
         outer.addWidget(self.error_box)
+        outer.addStretch(1)
 
         self.refresh()
 
@@ -918,6 +933,10 @@ class StudyPanel(QWidget):
         if checked:
             self._refresh_history(_now())
 
+    def _toggle_deck_history(self, checked: bool) -> None:
+        self.deck_history_body.setVisible(checked)
+        self._refresh_history(_now())
+
     def _handle_error_action(self) -> None:
         if self.controller.online.get("review_error"):
             self.controller.review_dirty = True
@@ -936,7 +955,7 @@ class StudyPanel(QWidget):
         self._refresh_history(_now())
 
     def _update_history_toggle(self) -> None:
-        state = self.tr("닫기", "Hide") if self.history_toggle.isChecked() else self.tr("보기", "Show")
+        state = "-" if self.history_toggle.isChecked() else "+"
         self.history_toggle.setText(self.tr(f"내 기록    {state}", f"My history    {state}"))
         self.history_toggle.setToolTip(self.tr(
             "최근 7일: 이 PC에 동기화된 Anki 복습 기록\n덱 비교: 이 PC의 활동 시간 · 모바일 기록 제외",
@@ -956,7 +975,8 @@ class StudyPanel(QWidget):
 
     def _refresh_history(self, current: datetime) -> None:
         self._refresh_weekly(current)
-        self.deck_history_title.setText(self.tr("현재 덱 비교", "Current deck comparison"))
+        sign = "-" if self.deck_history_title.isChecked() else "+"
+        self.deck_history_title.setText(self.tr("현재 덱 비교 ", "Current deck comparison ") + sign)
         tracker = self.controller.tracker
         deck_id = tracker.current_deck_id
         deck_record = tracker.today_deck(current)
@@ -1051,7 +1071,7 @@ class StudyPanel(QWidget):
             None,
         )
         if selected:
-            self.weekly_day_detail.setText(selected.accessibleName())
+            self.weekly_day_detail.setText(self._weekly_detail(selected))
             self.weekly_day_detail.show()
         else:
             self.weekly_day_detail.hide()
@@ -1071,11 +1091,15 @@ class StudyPanel(QWidget):
             prefix = "+" if value > 0 else "−" if value < 0 else "±"
             return prefix + self.format_clock(abs(value))
 
-        self.weekly_summary.setText(self.tr(
+        comparison_text = self.tr(
             f"{active_days}일 · {self.format_clock(seconds)} · {answers}회\n"
             f"이전 7일보다  시간 {signed_time(time_diff)} · 답변 {signed_count(answer_diff)}",
             f"{active_days} days · {self.format_clock(seconds)} · {answers} answers\n"
             f"vs previous 7 days  time {signed_time(time_diff)} · answers {signed_count(answer_diff)}",
+        )
+        self.weekly_summary.setText(self.tr(
+            f"{active_days}/7일 · {self.format_clock(seconds)} · {answers}회",
+            f"{active_days}/7 days · {self.format_clock(seconds)} · {answers} answers",
         ))
         checked = ""
         if record.get("as_of"):
@@ -1088,15 +1112,21 @@ class StudyPanel(QWidget):
             f"마지막 확인 {checked} (UTC+9)" if checked else "마지막 확인 시각(UTC+9)",
             f"Last checked {checked} (UTC+9)" if checked else "Last checked time (UTC+9)",
         )
-        self.weekly_summary.setToolTip(self.tr(
+        self.weekly_summary.setToolTip(comparison_text + "\n" + self.tr(
             f"{cutoff} 기준으로 최근 7일과 이전 7일을 비교합니다.",
             f"Compares recent and previous 7-day periods at {cutoff}.",
         ))
 
     def show_weekly_day(self, button: WeeklyDayButton) -> None:
         self.weekly_selected_day = button.day
-        self.weekly_day_detail.setText(button.accessibleName())
+        self.weekly_day_detail.setText(self._weekly_detail(button))
         self.weekly_day_detail.setVisible(True)
+
+    def _weekly_detail(self, button: WeeklyDayButton) -> str:
+        day = button.day[5:].replace("-", "/")
+        duration = self.format_clock(button.seconds)
+        return self.tr(f"{day} · {duration} · {button.answers}회",
+                       f"{day} · {duration} · {button.answers} answers")
 
     def _rate_text(self, value) -> str:
         if value is None:
@@ -1244,7 +1274,7 @@ class StudyPanel(QWidget):
         self.time_column.setText(self.tr("시간", "Time"))
         self.answer_column.setText(self.tr("답변", "Answers"))
         self._refresh_members(members)
-        self.member_scroll.setVisible(bool(members))
+        self.member_body.setVisible(bool(members))
         self.member_empty.setVisible(not members)
         if members:
             self.member_empty.clear()
