@@ -175,14 +175,15 @@ def main() -> int:
     friend["current_deck_name"] = "영어::<단어>"
     friend["deck_updated_at"] = current.isoformat()
     panel.refresh()
-    assert "현재 덱  영어::<단어>" in first_row.details.text()
+    assert first_row.details.text().startswith("영어::<단어>")
     friend["deck_updated_at"] = (current - timedelta(seconds=100)).isoformat()
     panel.refresh()
     assert "<단어>" not in first_row.details.text()
     friend["deck_updated_at"] = current.isoformat()
     friend["status"] = "paused"
     panel.refresh()
-    assert "공부 중 아님" in first_row.details.text()
+    assert "공부 중 아님" not in first_row.details.text()
+    assert "영어" not in first_row.details.text()
     friend["status"] = "studying"
     panel.refresh()
     first_row.identity.click()
@@ -197,13 +198,38 @@ def main() -> int:
     online_row = panel.member_rows["friend-b"]
     assert online_row.dot.text() == "○" and online_row.dot.isVisible()
     assert online_row.dot.styleSheet() == ""
-    assert panel.own_time.text() == "30:00 / 60분"
-    assert panel.own_answers.text() == "60 / 100"
-    assert "24분" in panel.own_title.toolTip()
+    assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
+    assert panel.own_answers.accessibleName() == "60 / 100"
+    assert "24:10" in panel.own_title.toolTip()
+    assert panel.time_caption.text() == "공부 시간"
+    assert panel.answer_caption.text() == "답변"
+    assert first_row.answers.text().isdigit()
     assert panel.collapse_panel.toolTip() == "패널 접기"
-    assert panel.format_duration(3600) == "1시간 00분"
-    assert panel.format_clock(3661) == "1시간 01분"
+    assert panel.format_duration(3600) == "1:00:00"
+    assert panel.format_clock(3661) == "1:01:01"
     assert panel.format_clock(3599) == "59:59"
+    assert panel.format_clock(0) == "00:00"
+    assert panel.format_clock(36000) == "10:00:00"
+    # Empty details never expand; stale time is shown once in the summary.
+    empty_friend = dict(online_row.member, status="offline", time_goal_minutes=0,
+                        card_goal=0, current_deck_name=None)
+    online_row.update_member(empty_friend)
+    online_row.identity.click()
+    assert not online_row.expanded and not online_row.details.text()
+    assert "갱신 " in online_row.identity_text.text()
+    assert "목표 없음" not in online_row.details.text()
+    online_row.update_member(dict(empty_friend, active_seconds=None, answer_count=None))
+    assert online_row.time.text() == "—" and online_row.answers.text() == "—"
+    online_row.update_member(controller.online["members"][1])
+    # Clicking the numeric side of the row and keyboard Space both toggle details.
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtCore import Qt
+    numeric_point = first_row.time.geometry().center()
+    QTest.mouseClick(first_row.identity, Qt.MouseButton.LeftButton, pos=numeric_point)
+    assert not first_row.expanded
+    first_row.identity.setFocus()
+    QTest.keyClick(first_row.identity, Qt.Key.Key_Space)
+    assert first_row.expanded
     panel.set_collapsed(True)
     app.processEvents()
     assert panel.collapsed
@@ -230,15 +256,36 @@ def main() -> int:
     assert panel.member_order == original_order
     assert first_row.expanded and first_row.details.isVisible()
     assert panel.own_title.text() == "You · all PCs"
-    assert "Current deck  영어::<단어>" in first_row.details.text()
-    assert panel.own_time.text() == "30:00 / 60m"
+    assert first_row.details.text().startswith("영어::<단어>")
+    assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
     assert panel.history_toggle.isChecked()
     assert panel.collapse_panel.toolTip() == "Collapse panel"
-    assert panel.format_duration(3600) == "1h 00m"
+    assert panel.format_duration(3600) == "1:00:00"
 
     english = OUTPUT / "native-en.png"
     if not panel.grab().save(str(english)):
         raise RuntimeError(f"could not save {english}")
+
+    original_palette = app.palette()
+    dark = QtGui.QPalette(original_palette)
+    for role in (QtGui.QPalette.ColorRole.Window, QtGui.QPalette.ColorRole.Base,
+                 QtGui.QPalette.ColorRole.Button):
+        dark.setColor(role, QtGui.QColor("#292929"))
+    for role in (QtGui.QPalette.ColorRole.WindowText, QtGui.QPalette.ColorRole.Text,
+                 QtGui.QPalette.ColorRole.ButtonText):
+        dark.setColor(role, QtGui.QColor("#eeeeee"))
+    dark.setColor(QtGui.QPalette.ColorRole.Midlight, QtGui.QColor("#3c3c3c"))
+    app.setPalette(dark)
+    app.processEvents()
+    controller.locale = "ko"
+    tracker.time_goal_minutes = 300
+    panel.refresh()
+    app.processEvents()
+    assert "5:00:00" in panel.own_time.accessibleName()
+    assert "#eeeeee" in first_row.identity_text.styleSheet()
+    assert panel.grab().save(str(OUTPUT / "native-ko-dark.png"))
+    tracker.time_goal_minutes = 60
+    app.setPalette(original_palette)
 
     panel.close()
 

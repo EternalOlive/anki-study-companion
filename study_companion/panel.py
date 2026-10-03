@@ -98,12 +98,22 @@ class MemberRow(QWidget):
         layout.setContentsMargins(0, 7, 0, 7)
         layout.setSpacing(5)
 
-        self.summary = QGridLayout()
-        self.summary.setContentsMargins(0, 0, 0, 0)
+        self.identity = QPushButton(self)
+        self.identity.setObjectName("member_summary")
+        self.identity.setFlat(True)
+        self.identity.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.identity.setStyleSheet(
+            "QPushButton#member_summary { background: transparent; border: 1px solid transparent; border-radius: 4px; }"
+            "QPushButton#member_summary[expandable=\"true\"]:hover { background: palette(midlight); }"
+            "QPushButton#member_summary:focus { border-color: palette(highlight); }"
+        )
+        self.identity.clicked.connect(self.toggle_expanded)
+        self.summary = QGridLayout(self.identity)
+        self.summary.setContentsMargins(3, 3, 3, 3)
         self.summary.setHorizontalSpacing(8)
         self.summary.setVerticalSpacing(4)
 
-        self.dot = QLabel(self)
+        self.dot = QLabel(self.identity)
         self.dot.setText("●")
         self.dot.setFixedWidth(10)
         self.dot.setAlignment(
@@ -112,15 +122,6 @@ class MemberRow(QWidget):
         self.dot.setAccessibleName(self.panel.tr("공부 중", "Studying"))
         self.summary.addWidget(self.dot, 0, 0)
 
-        self.identity = QPushButton(self)
-        self.identity.setFlat(True)
-        self.identity.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        self.identity.setStyleSheet("QPushButton { text-align: left; padding: 2px 0; }")
-        identity_layout = QVBoxLayout(self.identity)
-        identity_layout.setContentsMargins(0, 2, 0, 2)
-        identity_layout.setSpacing(0)
         self.identity_text = QLabel(self.identity)
         self.identity_text.setTextFormat(Qt.TextFormat.PlainText)
         self.identity_text.setAttribute(
@@ -130,25 +131,25 @@ class MemberRow(QWidget):
         self.identity_text.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        identity_layout.addWidget(self.identity_text)
-        self.identity.clicked.connect(self.toggle_expanded)
-        self.summary.addWidget(self.identity, 0, 1)
+        self.summary.addWidget(self.identity_text, 0, 1)
 
-        self.time = QLabel(self)
+        self.time = QLabel(self.identity)
         self.time.setMinimumWidth(50)
         self.time.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self.summary.addWidget(self.time, 0, 2)
 
-        self.answers = QLabel(self)
+        self.answers = QLabel(self.identity)
         self.answers.setMinimumWidth(44)
         self.answers.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
         self.summary.addWidget(self.answers, 0, 3)
         self.summary.setColumnStretch(1, 1)
-        layout.addLayout(self.summary)
+        for label in (self.dot, self.time, self.answers):
+            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        layout.addWidget(self.identity)
 
         self.details = QLabel(self)
         self.details.setTextFormat(Qt.TextFormat.PlainText)
@@ -176,66 +177,57 @@ class MemberRow(QWidget):
             return
         self._compact = compact
         self.summary.removeWidget(self.dot)
-        self.summary.removeWidget(self.identity)
+        self.summary.removeWidget(self.identity_text)
         self.summary.removeWidget(self.time)
         self.summary.removeWidget(self.answers)
         if compact:
             self.summary.addWidget(self.dot, 0, 0)
-            self.summary.addWidget(self.identity, 0, 1, 1, 3)
+            self.summary.addWidget(self.identity_text, 0, 1, 1, 3)
             self.summary.addWidget(self.time, 1, 2)
             self.summary.addWidget(self.answers, 1, 3)
         else:
             self.summary.addWidget(self.dot, 0, 0)
-            self.summary.addWidget(self.identity, 0, 1)
+            self.summary.addWidget(self.identity_text, 0, 1)
             self.summary.addWidget(self.time, 0, 2)
             self.summary.addWidget(self.answers, 0, 3)
 
     def toggle_expanded(self) -> None:
+        if not self.details.text():
+            return
         self.expanded = not self.expanded
+        self.identity.setChecked(self.expanded)
         self.details.setVisible(self.expanded)
 
     def update_member(self, member: dict) -> None:
         self.member = member
+        foreground = self.panel.palette().color(QPalette.ColorRole.WindowText).name()
+        for label in (self.identity_text, self.time, self.answers):
+            label.setStyleSheet(f"color: {foreground}; background: transparent;")
         status = self.panel.controller._current_member_status(member)
         name = self.panel.member_name(member)
         status_text = self.panel.status_text(status)
+        if status == "offline":
+            updated = self.panel.updated_time(member.get("updated_at"))
+            status_text = self.panel.tr(f"갱신 {updated}", f"Updated {updated}")
         self.identity_text.setText(
             f"{_allow_anywhere_wrap(name)}  ·  {status_text}"
         )
         self.identity.setToolTip(f"{name} · {status_text}")
-        self.identity.setAccessibleName(
-            self.panel.tr(
-                f"{name}, {status_text}. 공부 중인 덱과 목표 보기",
-                f"{name}, {status_text}. Show current deck and goals",
-            )
-        )
-
         self.panel.update_status_dot(self.dot, status)
 
         seconds = max(0, int(member.get("active_seconds") or 0))
         answers = max(0, int(member.get("answer_count") or 0))
-        self.time.setText(self.panel.format_duration(seconds))
-        self.answers.setText(self.panel.tr(f"{answers}회", f"{answers}"))
+        self.time.setText(self.panel.format_duration(seconds) if member.get("active_seconds") is not None else "—")
+        self.answers.setText(str(answers) if member.get("answer_count") is not None else "—")
         self.time.setAccessibleName(
             self.panel.tr(f"공부 시간 {self.time.text()}", f"Study time {self.time.text()}")
         )
         self.answers.setAccessibleName(
-            self.panel.tr(f"답변 {answers}회", f"{answers} answers")
+            self.panel.tr(f"답변 {self.answers.text()}", f"Answers {self.answers.text()}")
         )
 
         time_goal = max(0, int(member.get("time_goal_minutes") or 0))
         answer_goal = max(0, int(member.get("card_goal") or 0))
-        time_goal_text = (
-            self.panel.tr(f"{time_goal}분", f"{time_goal} min")
-            if time_goal
-            else self.panel.tr("목표 없음", "No goal")
-        )
-        answer_goal_text = (
-            self.panel.tr(f"{answer_goal}회", f"{answer_goal}")
-            if answer_goal
-            else self.panel.tr("목표 없음", "No goal")
-        )
-        updated_text = self.panel.updated_time(member.get("updated_at"))
         deck_name = None
         if status == "studying" and member.get("current_deck_name"):
             try:
@@ -244,20 +236,31 @@ class MemberRow(QWidget):
                     deck_name = _allow_anywhere_wrap(str(member["current_deck_name"]))
             except (KeyError, TypeError, ValueError):
                 pass
-        deck_text = deck_name or self.panel.tr(
-            "정보 없음" if status == "studying" else "공부 중 아님",
-            "Not available" if status == "studying" else "Not studying",
-        )
-        self.details.setText(
-            self.panel.tr(
-                f"현재 덱  {deck_text}\n"
-                f"시간 목표  {time_goal_text}    답변 목표  {answer_goal_text}\n"
-                f"마지막 기록  {updated_text}",
-                f"Current deck  {deck_text}\n"
-                f"Time goal  {time_goal_text}    Answer goal  {answer_goal_text}\n"
-                f"Last update  {updated_text}",
-            )
-        )
+        lines = [deck_name] if deck_name else []
+        goals = []
+        if time_goal:
+            goals.append(self.panel.format_clock(time_goal * 60))
+        if answer_goal:
+            goals.append(self.panel.tr(f"{answer_goal}회", f"{answer_goal} answers"))
+        if goals:
+            lines.append(self.panel.tr("목표 ", "Goal ") + " · ".join(goals))
+        self.details.setText("\n".join(lines))
+        expandable = bool(lines)
+        changed = self.identity.property("expandable") != expandable
+        self.identity.setProperty("expandable", expandable)
+        self.identity.setCheckable(expandable)
+        self.identity.setFocusPolicy(Qt.FocusPolicy.StrongFocus if expandable else Qt.FocusPolicy.NoFocus)
+        self.identity.setCursor(Qt.CursorShape.PointingHandCursor if expandable else Qt.CursorShape.ArrowCursor)
+        self.identity.setAccessibleName(f"{name}, {status_text}" + (
+            self.panel.tr(". 덱과 목표 보기", ". Show deck and goals") if expandable else ""
+        ))
+        if not expandable:
+            self.expanded = False
+        self.identity.setChecked(self.expanded)
+        self.details.setVisible(self.expanded)
+        if changed:
+            self.identity.style().unpolish(self.identity)
+            self.identity.style().polish(self.identity)
         self._set_compact(
             self.width()
             < self.time.sizeHint().width()
@@ -561,17 +564,29 @@ class StudyPanel(QWidget):
         return str(member.get("display_name") or self.tr("친구", "Friend"))
 
     def format_duration(self, seconds: int) -> str:
-        minutes = max(0, int(seconds) // 60)
-        if minutes >= 60:
-            hours, remaining = divmod(minutes, 60)
-            return self.tr(f"{hours}시간 {remaining:02d}분", f"{hours}h {remaining:02d}m")
-        return self.tr(f"{minutes}분", f"{minutes}m")
+        return self.format_clock(seconds)
 
     def format_clock(self, seconds: int) -> str:
-        if seconds >= 3600:
-            return self.format_duration(seconds)
         minutes, remaining = divmod(max(0, int(seconds)), 60)
+        if minutes >= 60:
+            hours, minutes = divmod(minutes, 60)
+            return f"{hours}:{minutes:02d}:{remaining:02d}"
         return f"{minutes:02d}:{remaining:02d}"
+
+    def set_metric(self, label: QLabel, value: str, goal: str | None) -> None:
+        label.setTextFormat(Qt.TextFormat.RichText)
+        label.setAccessibleName(f"{value} / {goal}" if goal else value)
+        text = html.escape(value)
+        if goal:
+            foreground = self.palette().color(QPalette.ColorRole.WindowText)
+            background = self.palette().color(QPalette.ColorRole.Window)
+            channels = [round(a * 0.7 + b * 0.3) for a, b in zip(
+                foreground.getRgb()[:3], background.getRgb()[:3]
+            )]
+            color = "#%02x%02x%02x" % tuple(channels)
+            size = max(8, label.font().pointSizeF() * 0.72)
+            text += f'<span style="font-size: {size:.1f}pt; font-weight: 400; color: {color}"> / {html.escape(goal)}</span>'
+        label.setText(text)
 
     def updated_time(self, value) -> str:
         if not value:
@@ -793,23 +808,16 @@ class StudyPanel(QWidget):
         time_goal = max(0, int(tracker.time_goal_minutes or 0))
         answer_value = max(0, int((own_record or {}).get("answer_count" if group else "answers") or 0))
         answer_goal = max(0, int(tracker.card_goal or 0))
-        self.own_time.setText(
-            f"{time_value} / {self.tr(f'{time_goal}분', f'{time_goal}m')}"
-            if time_goal
-            else time_value
-        )
-        self.own_answers.setText(
-            f"{answer_value} / {answer_goal}" if answer_goal else str(answer_value)
-        )
-        if group and not my_total:
-            self.own_time.setText("—")
-            self.own_answers.setText("—")
+        pending = bool(group and not my_total)
+        self.set_metric(self.own_time, "—" if pending else time_value,
+                        self.format_clock(time_goal * 60) if time_goal and not pending else None)
+        self.set_metric(self.own_answers, "—" if pending else str(answer_value),
+                        str(answer_goal) if answer_goal and not pending else None)
         self.time_caption.setText(
-            self.tr("시간 / 목표 · 동기화 기준", "Time / goal · synced") if group and my_total
-            else self.tr("동기화 대기", "Awaiting sync") if group
-            else self.tr("시간 / 목표", "Time / goal")
+            self.tr("동기화 대기", "Awaiting sync") if pending
+            else self.tr("공부 시간", "Study time")
         )
-        self.answer_caption.setText(self.tr("답변 / 목표", "Answers / goal"))
+        self.answer_caption.setText(self.tr("답변", "Answers"))
 
         self.people_caption.setText(self.tr("친구", "Friends"))
         self.time_column.setText(self.tr("시간", "Time"))
