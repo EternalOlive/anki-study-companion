@@ -119,6 +119,8 @@ class Controller:
         self.client = SupabaseClient()
         self.sync_in_flight = False
         self.sync_pending = False
+        self.sync_failure_count = 0
+        self.next_sync_attempt_at = 0.0
         self._member_cache_key = None
         self._last_member_fetch_at = 0
         self.identity_in_flight = False
@@ -423,6 +425,7 @@ class Controller:
             self.panel.show()
             self.panel_expand.hide()
             mw.resizeDocks([self.panel], [target_width], Qt.Orientation.Horizontal)
+            self.panel_body.refresh()
         self.ui_state["panel_collapsed"] = collapsed
         if persist:
             self.save()
@@ -437,7 +440,8 @@ class Controller:
         self.panel_action.setText(self.t("스터디 패널", "Study panel"))
         self.panel_expand.setToolTip(self.t("스터디 패널 펼치기", "Show study panel"))
         self.panel_expand.setAccessibleName(self.panel_expand.toolTip())
-        self.panel_body.refresh()
+        if self.panel.isVisible():
+            self.panel_body.refresh()
 
     def show_dialog(self):
         if self.closed:
@@ -640,6 +644,22 @@ class Controller:
 
         if self.closed:
             return
+        retry_clock = clock_module.monotonic()
+        if (
+            not force
+            and retry_clock < float(getattr(self, "next_sync_attempt_at", 0) or 0)
+        ):
+            return
+
+        def schedule_retry():
+            failures = int(getattr(self, "sync_failure_count", 0) or 0) + 1
+            self.sync_failure_count = failures
+            retry_delay = min(300, 30 * (2 ** min(failures, 4)))
+            self.next_sync_attempt_at = clock_module.monotonic() + retry_delay
+
+        def clear_retry():
+            self.sync_failure_count = 0
+            self.next_sync_attempt_at = 0.0
         if self.sync_in_flight:
             if force:
                 self.sync_pending = True
@@ -696,7 +716,9 @@ class Controller:
         member_cache_key = (auth["user_id"], group_id, study_day)
         last_member_fetch = float(getattr(self, "_last_member_fetch_at", 0) or 0)
         member_fetch_age = clock_now - last_member_fetch
-        fetch_members = bool(group) and (
+        panel = getattr(self, "panel", None)
+        panel_visible = panel is None or panel.isVisible()
+        fetch_members = bool(group) and panel_visible and (
             force
             or getattr(self, "_member_cache_key", None) != member_cache_key
             or not isinstance(self.online.get("members"), list)
@@ -997,8 +1019,10 @@ class Controller:
                     self._last_member_fetch_at = clock_module.time()
                 if sync_error is not None:
                     self.online["last_error"] = str(sync_error)
+                    schedule_retry()
                 else:
                     self.online.pop("last_error", None)
+                    clear_retry()
                 self.save()
             except SupabaseError as error:
                 if error.status == 401:
@@ -1007,9 +1031,11 @@ class Controller:
                     self.online["last_error"] = "로그인이 만료되었습니다. 다시 로그인해 주세요."
                 else:
                     self.online["last_error"] = str(error)
+                schedule_retry()
                 self.save()
             except Exception as error:
                 self.online["last_error"] = str(error)
+                schedule_retry()
                 self.save()
             if self.sync_pending:
                 self.sync_pending = False
@@ -1020,9 +1046,10 @@ class Controller:
             mw.taskman.run_in_background(task, done)
         except RuntimeError:
             self.sync_in_flight = False
+            schedule_retry()
             self.online["last_error"] = self.t(
-                "동기화를 시작하지 못했습니다. 다음 갱신 때 다시 시도합니다.",
-                "Sync could not start. It will retry on the next update.",
+                "동기화를 시작하지 못했습니다. 잠시 후 자동으로 다시 시도합니다.",
+                "Sync could not start. It will retry automatically after a delay.",
             )
 
 

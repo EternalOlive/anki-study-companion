@@ -21,7 +21,7 @@ window.form = type('Form', (), {'menuTools': window.menuBar().addMenu('Tools')})
 tree = ast.parse((smoke.ROOT / 'study_companion/addon.py').read_text(encoding='utf-8'))
 controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Controller')
 methods = [node for node in controller.body if isinstance(node, ast.FunctionDef)
-           and node.name in ('_build_side_panel', 'set_panel_collapsed')]
+           and node.name in ('_build_side_panel', 'set_panel_collapsed', 'refresh_panel')]
 scope = dict(mw=window, Qt=Qt, QTimer=QTimer, StudyPanel=StudyPanel,
              PanelToggleButton=PanelToggleButton)
 for name in ('QDockWidget', 'QScrollArea', 'QToolButton', 'QStyle', 'QWidget', 'QHBoxLayout'):
@@ -32,13 +32,23 @@ fake.ui_state = {}
 fake.closed = False
 fake.save = lambda: None
 import types
-for name in ('_build_side_panel', 'set_panel_collapsed'):
+fake.action = types.SimpleNamespace(setText=lambda _text: None)
+for name in ('_build_side_panel', 'set_panel_collapsed', 'refresh_panel'):
     setattr(fake, name, types.MethodType(scope[name], fake))
 fake._build_side_panel()
 window.show()
 app.processEvents()
 fake.set_panel_collapsed(False)
 app.processEvents()
+refresh_calls = []
+fake.panel_body.refresh = lambda: refresh_calls.append(fake.panel.isVisible())
+fake.set_panel_collapsed(True)
+fake.refresh_panel()
+assert refresh_calls == []
+fake.set_panel_collapsed(False, persist=False)
+fake.refresh_panel()
+assert refresh_calls == [True, True]
+fake.panel_body.refresh = lambda: None
 original = fake.panel.width()
 for _ in range(5):
     fake.panel_body.collapse_panel.click()

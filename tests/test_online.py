@@ -69,6 +69,17 @@ class SupabaseClientTests(unittest.TestCase):
         self.assertEqual(caught.exception.status, 503)
         self.assertEqual(len(opener.calls), 1)
 
+    def test_full_room_has_a_clear_bilingual_error(self):
+        error = HTTPError(
+            "https://example/rpc/join_study_group_safe", 400, "bad request", {},
+            io.BytesIO(b'{"message":"study group is full"}'),
+        )
+        with self.assertRaises(SupabaseError) as caught:
+            SupabaseClient(opener=FakeOpener([error])).join_group("access", "ABCD")
+        self.assertEqual(caught.exception.status, 409)
+        self.assertIn("최대 10명", str(caught.exception))
+        self.assertIn("up to 10 people", str(caught.exception))
+
     def test_current_deck_is_bounded_and_can_be_cleared(self):
         opener = FakeOpener([None, None])
         client = SupabaseClient(opener=opener)

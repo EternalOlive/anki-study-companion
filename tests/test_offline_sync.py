@@ -84,6 +84,8 @@ class OfflineSyncTests(unittest.TestCase):
         controller.closed = False
         controller.sync_in_flight = False
         controller.sync_pending = False
+        controller.sync_failure_count = 0
+        controller.next_sync_attempt_at = 0.0
         controller.identity_generation = 0
         controller.online = {
             "auth": {"user_id": "user-a", "access_token": "token"},
@@ -241,6 +243,47 @@ class OfflineSyncTests(unittest.TestCase):
             self.controller.client.member_calls,
             [("token", "room-a", "2026-10-04")],
         )
+
+    def test_hidden_panel_skips_member_read_even_when_forced(self):
+        self.controller.panel = SimpleNamespace(isVisible=lambda: False)
+
+        self.controller.sync_async(force=True)
+        task, _done = self.take_background()
+        _auth, _acks, members, _deck_published, _error = task()
+
+        self.assertIsNone(members)
+        self.assertEqual(self.controller.client.member_calls, [])
+
+    def test_network_failures_back_off_and_force_can_bypass_delay(self):
+        self.controller.client.fail_days.add("2026-10-04")
+        with patch.object(time, "monotonic", return_value=100):
+            self.controller.sync_async()
+            self.finish_background()
+
+        self.assertEqual(self.controller.sync_failure_count, 1)
+        self.assertEqual(self.controller.next_sync_attempt_at, 160)
+
+        with patch.object(time, "monotonic", return_value=159):
+            self.controller.sync_async()
+        self.assertEqual(self.scheduled, [])
+
+        with patch.object(time, "monotonic", return_value=159):
+            self.controller.sync_async(force=True)
+        self.assertEqual(len(self.scheduled), 1)
+
+    def test_success_resets_retry_backoff(self):
+        self.controller.client.fail_days.add("2026-10-04")
+        with patch.object(time, "monotonic", return_value=100):
+            self.controller.sync_async()
+            self.finish_background()
+        self.controller.client.fail_days.clear()
+
+        with patch.object(time, "monotonic", return_value=101):
+            self.controller.sync_async(force=True)
+            self.finish_background()
+
+        self.assertEqual(self.controller.sync_failure_count, 0)
+        self.assertEqual(self.controller.next_sync_attempt_at, 0.0)
 
     def test_clock_rollback_refreshes_members_instead_of_freezing_cache(self):
         self.controller.online["members"] = [{"user_id": "friend"}]

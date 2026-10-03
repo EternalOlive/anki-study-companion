@@ -385,6 +385,12 @@ class SupabaseClient:
                     "서버 업데이트가 필요합니다. 잠시 후 다시 시도하세요. / "
                     "The room server must be updated before joining.", status=503
                 ) from error
+            if "study group is full" in str(error).casefold():
+                raise SupabaseError(
+                    "방 인원이 가득 찼습니다. 한 방에는 방장을 포함해 최대 10명까지 참여할 수 있습니다. / "
+                    "This room is full. A room can have up to 10 people including the owner.",
+                    status=409,
+                ) from error
             raise
         if not isinstance(result, dict) or not result.get("ok"):
             if isinstance(result, dict) and result.get("error") == "TOO_MANY_ATTEMPTS":

@@ -58,7 +58,9 @@ class SyncStartTests(TestCase):
         self.controller.sync_async()
         self.assertFalse(self.controller.sync_in_flight)
         self.schedule.side_effect = None
-        self.controller.sync_async()
+        # Automatic retries back off after the scheduler itself fails, while a
+        # user/state-change forced retry remains immediately available.
+        self.controller.sync_async(force=True)
         self.assertEqual(self.schedule.call_count, 2)
 
     def test_one_timestamp_is_used_for_day_and_record(self):
