@@ -14,6 +14,11 @@ from aqt.qt import (
     QDockWidget,
     QEvent,
     QLabel,
+    QHBoxLayout,
+    QScrollArea,
+    QToolButton,
+    QStyle,
+    QWidget,
     QObject,
     QTimer,
     Qt,
@@ -132,6 +137,8 @@ class Controller:
         self.timer.stop()
         QApplication.instance().removeEventFilter(self.watcher)
         mw.statusBar().removeWidget(self.label)
+        mw.statusBar().removeWidget(self.panel_expand)
+        self.panel_expand.deleteLater()
         mw.form.menuTools.removeAction(self.action)
         mw.form.menuTools.removeAction(self.panel_action)
         mw.removeDockWidget(self.panel)
@@ -225,36 +232,57 @@ class Controller:
         self.panel = QDockWidget(self.t("스터디", "Study"), mw)
         self.panel.setObjectName("study_companion_panel")
         self.panel.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+            Qt.DockWidgetArea.RightDockWidgetArea
         )
+        self.panel.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
         self.panel_body = StudyPanel(self)
-        self.panel.setWidget(self.panel_body)
+        title_bar = QWidget(self.panel)
+        title_layout = QHBoxLayout(title_bar)
+        title_layout.setContentsMargins(2, 0, 2, 0)
+        title_layout.addStretch()
+        # Keep the collapse control outside scrollable content, even in a
+        # narrow window where the study details need horizontal scrolling.
+        title_layout.addWidget(self.panel_body.collapse_panel)
+        self.panel.setTitleBarWidget(title_bar)
+        self.panel_scroll = QScrollArea(self.panel)
+        self.panel_scroll.setWidgetResizable(True)
+        self.panel_scroll.setMinimumWidth(0)
+        self.panel_scroll.setWidget(self.panel_body)
+        self.panel.setWidget(self.panel_scroll)
         mw.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.panel)
+        self.panel_expand = QToolButton(mw)
+        self.panel_expand.setAutoRaise(True)
+        self.panel_expand.setIcon(mw.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft))
+        self.panel_expand.clicked.connect(lambda: self.set_panel_collapsed(False))
+        mw.statusBar().addPermanentWidget(self.panel_expand)
+        self.panel_expand.hide()
         self.panel_action = self.panel.toggleViewAction()
+        self.panel_action.triggered.connect(lambda visible: self.set_panel_collapsed(not visible))
         mw.form.menuTools.addAction(self.panel_action)
         self.panel.show()
-        if self.ui_state.get("panel_collapsed"):
-            QTimer.singleShot(
-                0, lambda: self.set_panel_collapsed(True, persist=False)
-            )
+        QTimer.singleShot(
+            0, lambda: self.set_panel_collapsed(
+                bool(self.ui_state.get("panel_collapsed")), persist=False
+            ) if not self.closed else None
+        )
 
     def set_panel_collapsed(self, collapsed, *, persist=True):
         collapsed = bool(collapsed)
         if collapsed:
             current_width = self.panel.width()
-            if current_width >= 280:
+            if self.panel.isVisible() and current_width >= 160:
                 self.ui_state["panel_width"] = current_width
-            self.panel_body.set_collapsed(True)
-            self.panel.setWindowTitle("")
-            self.panel.setMinimumWidth(44)
-            self.panel.setMaximumWidth(72)
-            mw.resizeDocks([self.panel], [52], Qt.Orientation.Horizontal)
+            self.panel.hide()
+            self.panel_expand.show()
         else:
             self.panel.setMaximumWidth(16777215)
             self.panel.setMinimumWidth(0)
             self.panel_body.set_collapsed(False)
             self.panel.setWindowTitle(self.t("스터디", "Study"))
-            target_width = max(280, int(self.ui_state.get("panel_width") or 320))
+            target_width = min(max(160, int(self.ui_state.get("panel_width") or 320)),
+                               max(160, mw.width() // 2))
+            self.panel.show()
+            self.panel_expand.hide()
             mw.resizeDocks([self.panel], [target_width], Qt.Orientation.Horizontal)
         self.ui_state["panel_collapsed"] = collapsed
         if persist:
@@ -266,6 +294,8 @@ class Controller:
             "" if self.panel_body.collapsed else self.t("스터디", "Study")
         )
         self.panel_action.setText(self.t("스터디 패널", "Study panel"))
+        self.panel_expand.setToolTip(self.t("스터디 패널 펼치기", "Show study panel"))
+        self.panel_expand.setAccessibleName(self.panel_expand.toolTip())
         self.panel_body.refresh()
 
     def show_dialog(self):
@@ -469,16 +499,16 @@ class Controller:
             return
         if not self._access_token():
             return
-        self.sync_in_flight = True
         auth = dict(self.online["auth"])
         display_name = canonical_nickname(auth["user_id"])
         update_name = self.online.get("display_name") != display_name
         group = dict(self.online.get("group") or {})
         group_id = group.get("id")
-        record = self.tracker.today(now())
+        current = now()
+        record = self.tracker.today(current)
         payload = None
         if group:
-            study_day = now().date().isoformat()
+            study_day = current.date().isoformat()
             device_snapshot = self.device_ledger.prepare(
                 user_id=auth["user_id"],
                 day=study_day,
@@ -496,7 +526,14 @@ class Controller:
             }
             # The revision and its exact cumulative snapshot must survive a
             # crash before the request; retries then remain idempotent.
-            self.save()
+            try:
+                self.save()
+            except OSError:
+                self.online["last_error"] = self.t(
+                    "로컬 기록을 저장하지 못해 전송을 보류했습니다. 저장 공간과 폴더 권한을 확인해 주세요.",
+                    "Upload paused because local records could not be saved. Check disk space and folder permissions.",
+                )
+                return
 
         def task():
             if auth.get("refresh_token") and time.time() >= auth.get("expires_at", 0) - 60:
@@ -605,7 +642,15 @@ class Controller:
                 self.sync_pending = False
                 QTimer.singleShot(0, lambda: self.sync_async(force=True))
 
-        mw.taskman.run_in_background(task, done)
+        self.sync_in_flight = True
+        try:
+            mw.taskman.run_in_background(task, done)
+        except RuntimeError:
+            self.sync_in_flight = False
+            self.online["last_error"] = self.t(
+                "동기화를 시작하지 못했습니다. 다음 갱신 때 다시 시도합니다.",
+                "Sync could not start. It will retry on the next update.",
+            )
 
 
 controller = None
