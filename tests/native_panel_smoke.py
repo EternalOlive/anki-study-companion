@@ -49,6 +49,8 @@ def _load_panel_types():
         "QPushButton",
         "QScrollArea",
         "QSizePolicy",
+        "QStyle",
+        "QToolButton",
         "QVBoxLayout",
         "QWidget",
     ):
@@ -176,6 +178,18 @@ def main() -> int:
     assert online_row.dot.text() == "○" and online_row.dot.isVisible()
     assert online_row.dot.styleSheet() == ""
     assert panel.own_time.text() == "24:10 / 60분"
+    assert panel.collapse_panel.toolTip() == "패널 접기"
+    panel.set_collapsed(True)
+    app.processEvents()
+    assert panel.collapsed
+    assert not panel.content.isVisible()
+    assert panel.expand_panel.isVisible()
+    assert panel.maximumWidth() == 52
+    panel.set_collapsed(False)
+    app.processEvents()
+    assert panel.content.isVisible()
+    assert not panel.expand_panel.isVisible()
+    assert panel.minimumWidth() == 280
 
     OUTPUT.mkdir(exist_ok=True)
     korean = OUTPUT / "native-ko.png"
@@ -193,6 +207,7 @@ def main() -> int:
     assert panel.own_title.text() == "You · today"
     assert panel.own_time.text() == "24:10 / 60m"
     assert panel.history_toggle.isChecked()
+    assert panel.collapse_panel.toolTip() == "Collapse panel"
 
     english = OUTPUT / "native-en.png"
     if not panel.grab().save(str(english)):

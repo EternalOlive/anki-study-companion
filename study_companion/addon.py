@@ -203,10 +203,38 @@ class Controller:
         self.panel_action = self.panel.toggleViewAction()
         mw.form.menuTools.addAction(self.panel_action)
         self.panel.show()
+        if self.ui_state.get("panel_collapsed"):
+            QTimer.singleShot(
+                0, lambda: self.set_panel_collapsed(True, persist=False)
+            )
+
+    def set_panel_collapsed(self, collapsed, *, persist=True):
+        collapsed = bool(collapsed)
+        if collapsed:
+            current_width = self.panel.width()
+            if current_width >= 280:
+                self.ui_state["panel_width"] = current_width
+            self.panel_body.set_collapsed(True)
+            self.panel.setWindowTitle("")
+            self.panel.setMinimumWidth(44)
+            self.panel.setMaximumWidth(72)
+            mw.resizeDocks([self.panel], [52], Qt.Orientation.Horizontal)
+        else:
+            self.panel.setMaximumWidth(16777215)
+            self.panel.setMinimumWidth(0)
+            self.panel_body.set_collapsed(False)
+            self.panel.setWindowTitle(self.t("스터디", "Study"))
+            target_width = max(280, int(self.ui_state.get("panel_width") or 320))
+            mw.resizeDocks([self.panel], [target_width], Qt.Orientation.Horizontal)
+        self.ui_state["panel_collapsed"] = collapsed
+        if persist:
+            self.save()
 
     def refresh_panel(self):
         self.action.setText(self.t("스터디 관리", "Study settings"))
-        self.panel.setWindowTitle(self.t("스터디", "Study"))
+        self.panel.setWindowTitle(
+            "" if self.panel_body.collapsed else self.t("스터디", "Study")
+        )
         self.panel_action.setText(self.t("스터디 패널", "Study panel"))
         self.panel_body.refresh()
 

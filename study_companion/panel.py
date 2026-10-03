@@ -18,6 +18,8 @@ from aqt.qt import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
+    QToolButton,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -164,14 +166,30 @@ class StudyPanel(QWidget):
         self.member_rows: dict[str, MemberRow] = {}
         self.member_order: list[str] = []
         self.history_mode = "yesterday"
+        self.collapsed = False
 
         self.setObjectName("study_companion_body")
         self.setMinimumWidth(280)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
-        outer = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        self.content = QWidget(self)
+        root.addWidget(self.content, 1)
+        outer = QVBoxLayout(self.content)
         outer.setContentsMargins(14, 14, 14, 14)
         outer.setSpacing(14)
+
+        self.expand_panel = QToolButton(self)
+        self.expand_panel.setAutoRaise(True)
+        self.expand_panel.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowLeft)
+        )
+        self.expand_panel.clicked.connect(lambda: self._request_collapsed(False))
+        self.expand_panel.hide()
+        root.addWidget(self.expand_panel, 0, Qt.AlignmentFlag.AlignHCenter)
 
         header = QHBoxLayout()
         header.setSpacing(8)
@@ -187,6 +205,13 @@ class StudyPanel(QWidget):
         self.manage.setFlat(True)
         self.manage.clicked.connect(self.controller.show_dialog)
         header.addWidget(self.manage)
+        self.collapse_panel = QToolButton(self)
+        self.collapse_panel.setAutoRaise(True)
+        self.collapse_panel.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowRight)
+        )
+        self.collapse_panel.clicked.connect(lambda: self._request_collapsed(True))
+        header.addWidget(self.collapse_panel)
         outer.addLayout(header)
 
         outer.addWidget(self._separator())
@@ -307,6 +332,29 @@ class StudyPanel(QWidget):
         outer.addWidget(self.error_box)
 
         self.refresh()
+
+    def _request_collapsed(self, collapsed: bool) -> None:
+        setter = getattr(self.controller, "set_panel_collapsed", None)
+        if callable(setter):
+            setter(collapsed)
+        else:
+            self.set_collapsed(collapsed)
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = bool(collapsed)
+        self.content.setVisible(not self.collapsed)
+        self.expand_panel.setVisible(self.collapsed)
+        self.setMinimumWidth(36 if self.collapsed else 280)
+        self.setMaximumWidth(52 if self.collapsed else 16777215)
+        self.update_collapse_controls()
+
+    def update_collapse_controls(self) -> None:
+        collapse_text = self.tr("패널 접기", "Collapse panel")
+        expand_text = self.tr("패널 펼치기", "Expand panel")
+        self.collapse_panel.setToolTip(collapse_text)
+        self.collapse_panel.setAccessibleName(collapse_text)
+        self.expand_panel.setToolTip(expand_text)
+        self.expand_panel.setAccessibleName(expand_text)
 
     def tr(self, ko: str, en: str) -> str:
         translate = getattr(self.controller, "t", None)
@@ -498,6 +546,7 @@ class StudyPanel(QWidget):
                 self.member_order.remove(key)
 
     def refresh(self) -> None:
+        self.update_collapse_controls()
         current = _now()
         tracker = self.controller.tracker
         record = tracker.today(current)
