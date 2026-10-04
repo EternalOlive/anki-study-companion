@@ -18,10 +18,12 @@ central = QtWidgets.QWidget()
 central.setMinimumWidth(600)
 window.setCentralWidget(central)
 window.form = type('Form', (), {'menuTools': window.menuBar().addMenu('Tools')})()
+existing_corner = QtWidgets.QLabel('Other add-on')
+window.menuBar().setCornerWidget(existing_corner)
 tree = ast.parse((smoke.ROOT / 'study_companion/addon.py').read_text(encoding='utf-8'))
 controller = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Controller')
 methods = [node for node in controller.body if isinstance(node, ast.FunctionDef)
-           and node.name in ('_build_side_panel', 'set_panel_collapsed', 'refresh_panel')]
+           and node.name in ('_build_side_panel', '_position_panel_expand', 'set_panel_collapsed', 'refresh_panel')]
 scope = dict(mw=window, Qt=Qt, QTimer=QTimer, StudyPanel=StudyPanel,
              PanelToggleButton=PanelToggleButton)
 for name in ('QDockWidget', 'QScrollArea', 'QToolButton', 'QStyle', 'QWidget', 'QHBoxLayout'):
@@ -33,13 +35,15 @@ fake.closed = False
 fake.save = lambda: None
 import types
 fake.action = types.SimpleNamespace(setText=lambda _text: None)
-for name in ('_build_side_panel', 'set_panel_collapsed', 'refresh_panel'):
+for name in ('_build_side_panel', '_position_panel_expand', 'set_panel_collapsed', 'refresh_panel'):
     setattr(fake, name, types.MethodType(scope[name], fake))
 fake._build_side_panel()
 window.show()
 app.processEvents()
 fake.set_panel_collapsed(False)
 app.processEvents()
+assert existing_corner.isVisible()
+assert window.menuBar().cornerWidget() is existing_corner
 refresh_calls = []
 fake.panel_body.refresh = lambda: refresh_calls.append(fake.panel.isVisible())
 fake.set_panel_collapsed(True)
@@ -55,10 +59,12 @@ for _ in range(5):
     app.processEvents()
     assert not fake.panel.isVisible()
     assert fake.panel_expand.isVisible()
+    assert fake.panel_expand.x() == window.width() - fake.panel_expand.width() - 4
     assert central.width() >= window.width() - 5
     fake.panel_expand.click()
     app.processEvents()
     assert fake.panel.isVisible() and not fake.panel_expand.isVisible()
+    assert fake.panel_body.collapse_panel.isVisible()
     assert abs(fake.panel.width() - original) <= 2
     assert fake.panel.geometry().right() < window.width()
 fake.set_panel_collapsed(True)
@@ -86,7 +92,7 @@ for theme, bg, fg in (('dark', '#202020', '#eeeeee'), ('light', '#fafafa', '#202
     for collapsed in (True, False):
         fake.set_panel_collapsed(collapsed)
         app.processEvents()
-        button = fake.panel_expand if collapsed else fake.panel_body.collapse_panel
+        button = fake.panel_expand
         assert button.width() == button.height() == 32
         assert button.focusPolicy() == Qt.FocusPolicy.StrongFocus
         capture = button.grab().toImage()

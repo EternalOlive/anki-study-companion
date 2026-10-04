@@ -2,6 +2,7 @@ import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from study_companion.activity import MAX_REVIEW_TIME_MS
 from study_companion.reviews import MAX_BATCH_ITEMS, ReviewHistory
 
 
@@ -197,6 +198,113 @@ class ReviewHistoryTests(unittest.TestCase):
             ],
         )
         self.assertEqual(history.today(DAY), {"seconds": 1.0, "answers": 3})
+
+    def test_review_time_uses_shared_bounds_in_totals_and_payloads(self):
+        history = ReviewHistory({})
+        history.observe(
+            "collection",
+            DAY,
+            [
+                row(1, time_ms=MAX_REVIEW_TIME_MS - 1),
+                row(2, time_ms=MAX_REVIEW_TIME_MS),
+                row(3, time_ms=MAX_REVIEW_TIME_MS + 1),
+                row(4, time_ms=-1),
+            ],
+        )
+
+        expected = [
+            MAX_REVIEW_TIME_MS - 1,
+            MAX_REVIEW_TIME_MS,
+            MAX_REVIEW_TIME_MS,
+            0,
+        ]
+        self.assertEqual(
+            history.today(DAY),
+            {"seconds": sum(expected) / 1000, "answers": 4},
+        )
+        self.assertEqual(
+            [
+                item["time_ms"]
+                for item in history.pending("user", "room")[0]["reviews"]
+            ],
+            expected,
+        )
+
+    def test_legacy_cached_time_and_ack_are_healed_without_resend(self):
+        event_key = "1:10"
+        state = {
+            "collections": {
+                "collection": {
+                    "days": {
+                        DAY: {
+                            "observed": True,
+                            "events": {
+                                event_key: {
+                                    "id": "1",
+                                    "card_id": "10",
+                                    "time_ms": MAX_REVIEW_TIME_MS + 1,
+                                    "changed_at": 0,
+                                }
+                            },
+                            "removed": {},
+                            "last_observed_keys": [event_key],
+                        }
+                    }
+                }
+            },
+            "routes": {
+                "user": {
+                    "room": {
+                        "sources": {
+                            "collection": {
+                                "days": {
+                                    DAY: {
+                                        "reviews": {
+                                            event_key: {
+                                                "time_ms": MAX_REVIEW_TIME_MS + 1,
+                                                "changed_at": 0,
+                                            }
+                                        },
+                                        "removed": {},
+                                        "activated": True,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "active_collection": "collection",
+        }
+
+        history = ReviewHistory(state)
+
+        self.assertEqual(history.today(DAY), {"seconds": 3600.0, "answers": 1})
+        self.assertEqual(history.pending("user", "room"), [])
+        self.assertEqual(
+            state["collections"]["collection"]["days"][DAY]["events"][event_key]["time_ms"],
+            MAX_REVIEW_TIME_MS,
+        )
+        self.assertEqual(
+            state["routes"]["user"]["room"]["sources"]["collection"]["days"][DAY]["reviews"][event_key]["time_ms"],
+            MAX_REVIEW_TIME_MS,
+        )
+
+    def test_normalized_ack_survives_restart_and_finishes_delivery(self):
+        state = {}
+        history = ReviewHistory(state)
+        history.observe(
+            "collection",
+            DAY,
+            [row(1, card_id=10, time_ms=MAX_REVIEW_TIME_MS + 1)],
+        )
+        batch = history.pending("user", "room")[0]
+        history.acknowledge("user", "room", batch)
+
+        restored = ReviewHistory(json.loads(json.dumps(state)))
+
+        self.assertEqual(batch["reviews"][0]["time_ms"], MAX_REVIEW_TIME_MS)
+        self.assertEqual(restored.pending("user", "room"), [])
 
     def test_late_acknowledgement_cannot_swallow_changed_or_new_review(self):
         history = ReviewHistory({})

@@ -16,6 +16,7 @@ from aqt.qt import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -36,6 +37,7 @@ from .study_day import (
     study_day as room_study_day,
 )
 from .tracker import TIMEZONE, answers_per_minute
+from .ux_services import ANSWER_GOAL_MAX, TIME_GOAL_MAX_MINUTES
 
 
 def _now() -> datetime:
@@ -57,8 +59,181 @@ def _allow_anywhere_wrap(value: str) -> str:
     return re.sub(r"\S{12,}", lambda match: "\u200b".join(match.group(0)), value)
 
 
+class GoalMetric(QLabel):
+    """Rich-text metric that behaves like a quiet, accessible button."""
+
+    def __init__(self, activated, parent=None):
+        super().__init__(parent)
+        self._activated = activated
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "QLabel { padding: 3px 4px; border: 1px solid transparent; border-radius: 4px; }"
+            "QLabel:hover { background: palette(midlight); }"
+            "QLabel:focus { border-color: palette(highlight); }"
+        )
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._activated()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self._activated()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class GoalEditor(QFrame):
+    """Single-goal popup; refreshes behind it never replace the user's draft."""
+
+    def __init__(self, panel: "StudyPanel", kind: str, anchor: QWidget):
+        super().__init__(panel, Qt.WindowType.Popup)
+        self.panel = panel
+        self.kind = kind
+        self.anchor = anchor
+        self.maximum = TIME_GOAL_MAX_MINUTES if kind == "time" else ANSWER_GOAL_MAX
+        current = (
+            panel.controller.tracker.time_goal_minutes
+            if kind == "time"
+            else panel.controller.tracker.card_goal
+        )
+        self.current = max(0, int(current or 0))
+        self.setObjectName("goal_editor")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            "QFrame#goal_editor { background: palette(window); border: 1px solid palette(mid); border-radius: 5px; }"
+        )
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 9, 10, 9)
+        layout.setSpacing(6)
+        title = QLabel(
+            panel.tr("공부 시간 목표", "Study time goal")
+            if kind == "time"
+            else panel.tr("답변 목표", "Answer goal"),
+            self,
+        )
+        _set_font(title, bold=True)
+        layout.addWidget(title)
+
+        entry_row = QHBoxLayout()
+        self.input = QLineEdit(self)
+        self.input.setText(str(self.current) if self.current else "")
+        self.input.setMaxLength(6)
+        self.input.setMaximumWidth(120)
+        self.input.setAccessibleName(title.text())
+        self.input.setPlaceholderText("60" if kind == "time" else "100")
+        self.unit = QLabel(panel.tr("분", "min") if kind == "time" else panel.tr("회", "answers"), self)
+        entry_row.addWidget(self.input, 1)
+        entry_row.addWidget(self.unit)
+        layout.addLayout(entry_row)
+
+        self.error = QLabel(self)
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+
+        buttons = QHBoxLayout()
+        self.clear = QPushButton(panel.tr("목표 해제", "Clear goal"), self)
+        self.cancel = QPushButton(panel.tr("취소", "Cancel"), self)
+        self.save = QPushButton(panel.tr("저장", "Save"), self)
+        self.save.setDefault(True)
+        self.clear.setVisible(bool(self.current))
+        buttons.addWidget(self.clear)
+        buttons.addStretch()
+        buttons.addWidget(self.cancel)
+        buttons.addWidget(self.save)
+        layout.addLayout(buttons)
+
+        self.input.textChanged.connect(self._validate)
+        self.input.returnPressed.connect(self._save)
+        self.clear.clicked.connect(self._clear)
+        self.cancel.clicked.connect(self.close)
+        self.save.clicked.connect(self._save)
+        self._validate()
+
+    def open_near_anchor(self) -> None:
+        self.adjustSize()
+        self.setMaximumWidth(max(220, self.anchor.screen().availableGeometry().width() - 16))
+        self.adjustSize()
+        origin = self.anchor.mapToGlobal(self.anchor.rect().bottomLeft())
+        screen = self.anchor.screen().availableGeometry()
+        x = min(max(screen.left(), origin.x()), screen.right() - self.width())
+        y = origin.y() + 4
+        if y + self.height() > screen.bottom():
+            y = max(screen.top(), self.anchor.mapToGlobal(self.anchor.rect().topLeft()).y() - self.height() - 4)
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.input.setFocus()
+        self.input.selectAll()
+
+    def _value(self):
+        text = self.input.text().strip()
+        if not re.fullmatch(r"[0-9]+", text):
+            return None
+        try:
+            value = int(text)
+        except ValueError:
+            return None
+        return value if 1 <= value <= self.maximum else None
+
+    def _validate(self) -> None:
+        value = self._value()
+        self.save.setEnabled(value is not None and value != self.current)
+        if not self.input.text().strip() or value is not None:
+            self.error.hide()
+
+    def _store(self, value: int) -> None:
+        try:
+            if self.kind == "time":
+                self.panel.controller.update_daily_goals(time_goal_minutes=value)
+            else:
+                self.panel.controller.update_daily_goals(card_goal=value)
+        except Exception as error:
+            self.error.setText(str(error) or self.panel.tr("저장하지 못했습니다.", "Could not save."))
+            self.error.show()
+            self.input.setFocus()
+            return
+        self.close()
+
+    def _save(self) -> None:
+        value = self._value()
+        if value is None:
+            self.error.setText(self.panel.tr(
+                f"1–{self.maximum} 사이의 정수를 입력하세요.",
+                f"Enter a whole number from 1 to {self.maximum}.",
+            ))
+            self.error.show()
+            return
+        if value != self.current:
+            self._store(value)
+
+    def _clear(self) -> None:
+        if self.current:
+            self._store(0)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:
+        if getattr(self.panel, "goal_editor", None) is self:
+            self.panel.goal_editor = None
+        super().closeEvent(event)
+
+
 class PanelToggleButton(QToolButton):
-    """Theme-aware dock control with a persistent, keyboard-visible outline."""
+    """Theme-aware edge control with a visible chevron and click target."""
 
     def __init__(self, parent=None, *, expand=False):
         super().__init__(parent)
@@ -74,7 +249,7 @@ class PanelToggleButton(QToolButton):
         background = self.palette().color(QPalette.ColorRole.Window)
         painter.fillRect(self.rect(), background)
         fill = self.palette().color(QPalette.ColorRole.WindowText)
-        fill.setAlpha(32 if self.isDown() else 20 if self.underMouse() else 8)
+        fill.setAlpha(32 if self.isDown() else 20 if self.underMouse() else 0)
         border = self.palette().color(QPalette.ColorRole.WindowText)
         border.setAlpha(220 if self.hasFocus() else 100 if self.underMouse() else 65)
         painter.setBrush(fill)
@@ -430,6 +605,12 @@ class MemberRow(QWidget):
         )
         self.summary.addWidget(self.identity_text, 0, 1)
 
+        self.deck = QLabel(self.identity)
+        self.deck.setTextFormat(Qt.TextFormat.PlainText)
+        self.deck.setWordWrap(True)
+        self.deck.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.summary.addWidget(self.deck, 1, 1, 1, 3)
+
         self.time = QLabel(self.identity)
         self.time.setMinimumWidth(50)
         self.time.setAlignment(
@@ -495,18 +676,21 @@ class MemberRow(QWidget):
         self.summary.removeWidget(self.time)
         self.summary.removeWidget(self.answers)
         self.summary.removeWidget(self.compact_metrics)
+        self.summary.removeWidget(self.deck)
         self.time.setVisible(not compact)
         self.answers.setVisible(not compact)
         self.compact_metrics.setVisible(compact)
         if compact:
             self.summary.addWidget(self.dot, 0, 0)
             self.summary.addWidget(self.identity_text, 0, 1, 1, 3)
-            self.summary.addWidget(self.compact_metrics, 1, 1, 1, 3)
+            self.summary.addWidget(self.deck, 1, 1, 1, 3)
+            self.summary.addWidget(self.compact_metrics, 2, 1, 1, 3)
         else:
             self.summary.addWidget(self.dot, 0, 0)
             self.summary.addWidget(self.identity_text, 0, 1)
             self.summary.addWidget(self.time, 0, 2)
             self.summary.addWidget(self.answers, 0, 3)
+            self.summary.addWidget(self.deck, 1, 1, 1, 3)
 
     def toggle_expanded(self) -> None:
         if not self.identity.property("expandable"):
@@ -521,6 +705,8 @@ class MemberRow(QWidget):
         foreground = self.panel.palette().color(QPalette.ColorRole.WindowText).name()
         for label in (self.identity_text, self.time, self.answers):
             label.setStyleSheet(f"color: {foreground}; background: transparent;")
+        muted = self.panel.palette().color(QPalette.ColorRole.PlaceholderText).name()
+        self.deck.setStyleSheet(f"color: {muted}; background: transparent;")
         status = self.panel.controller._current_member_status(member)
         name = self.panel.member_name(member)
         status_text = self.panel.status_text(status) if status in ("studying", "paused", "online") else ""
@@ -556,7 +742,16 @@ class MemberRow(QWidget):
                     deck_name = _allow_anywhere_wrap(str(member["current_deck_name"]))
             except (KeyError, TypeError, ValueError):
                 pass
-        lines = [deck_name] if deck_name else []
+        self.deck.setText(deck_name or "")
+        self.deck.setVisible(bool(deck_name))
+        self.deck.setAccessibleName(
+            self.panel.tr(f"공부 중인 덱 {deck_name}", f"Current deck {deck_name}")
+            if deck_name else ""
+        )
+        self.identity.setToolTip(
+            " · ".join(part for part in (name, status_text, deck_name) if part)
+        )
+        lines = []
         goals = []
         if time_goal:
             goals.append(self.panel.format_clock(time_goal * 60))
@@ -609,6 +804,8 @@ class StudyPanel(QWidget):
         self.history_mode = "yesterday"
         self.weekly_selected_day: str | None = None
         self.collapsed = False
+        self.goal_editor: GoalEditor | None = None
+        self._record_issue: str | None = None
 
         self.setObjectName("study_companion_body")
         self.setMinimumWidth(280)
@@ -673,9 +870,9 @@ class StudyPanel(QWidget):
         self.own_values.setContentsMargins(0, 0, 0, 0)
         self.own_values.setHorizontalSpacing(12)
         self.own_values.setVerticalSpacing(2)
-        self.own_time = QLabel(self)
+        self.own_time = GoalMetric(lambda: self._open_goal_editor("time"), self)
         _set_font(self.own_time, scale=1.75, bold=True)
-        self.own_answers = QLabel(self)
+        self.own_answers = GoalMetric(lambda: self._open_goal_editor("answers"), self)
         _set_font(self.own_answers, scale=1.35, bold=True)
         self.time_caption = QLabel(self)
         self.answer_caption = QLabel(self)
@@ -719,6 +916,22 @@ class StudyPanel(QWidget):
         self.member_empty = QLabel(self)
         self.member_empty.setWordWrap(True)
         outer.addWidget(self.member_empty)
+
+        self.no_room_actions = QWidget(self)
+        self.no_room_layout = QGridLayout(self.no_room_actions)
+        self.no_room_layout.setContentsMargins(0, 2, 0, 0)
+        self.no_room_layout.setHorizontalSpacing(7)
+        self.no_room_layout.setVerticalSpacing(6)
+        self.create_room = QPushButton(self.no_room_actions)
+        self.join_room = QPushButton(self.no_room_actions)
+        self.create_room.clicked.connect(lambda: self._show_dialog_page("create"))
+        self.join_room.clicked.connect(lambda: self._show_dialog_page("join"))
+        self.no_room_layout.addWidget(self.create_room, 0, 0)
+        self.no_room_layout.addWidget(self.join_room, 0, 1)
+        self.no_room_layout.setColumnStretch(0, 1)
+        self.no_room_layout.setColumnStretch(1, 1)
+        outer.addWidget(self.no_room_actions)
+        self._no_room_compact = False
 
         self.member_body = QWidget(self)
         self.member_layout = QVBoxLayout(self.member_body)
@@ -803,8 +1016,14 @@ class StudyPanel(QWidget):
         self.error_box = QWidget(self)
         error_layout = QHBoxLayout(self.error_box)
         error_layout.setContentsMargins(0, 2, 0, 0)
-        self.error_text = QLabel(self.error_box)
-        self.error_text.setWordWrap(True)
+        self.error_text = QPushButton(self.error_box)
+        self.error_text.setFlat(True)
+        self.error_text.setStyleSheet(
+            "QPushButton { text-align: left; padding: 3px 0; border: none; background: transparent; }"
+            "QPushButton:hover { text-decoration: underline; }"
+            "QPushButton:focus { border: 1px solid palette(highlight); border-radius: 3px; }"
+        )
+        self.error_text.clicked.connect(lambda: self._show_dialog_page("record_status"))
         self.retry = QPushButton(self.error_box)
         self.retry.clicked.connect(self._handle_error_action)
         error_layout.addWidget(self.error_text, 1)
@@ -867,12 +1086,43 @@ class StudyPanel(QWidget):
                 self.history_selector.addWidget(self.yesterday, 0, 0)
                 self.history_selector.addWidget(self.best, 0, 1)
 
+        no_room_needed = (
+            self.create_room.sizeHint().width()
+            + self.join_room.sizeHint().width()
+            + self.no_room_layout.horizontalSpacing()
+        )
+        no_room_compact = no_room_needed > available
+        if no_room_compact != self._no_room_compact:
+            self._no_room_compact = no_room_compact
+            self.no_room_layout.removeWidget(self.create_room)
+            self.no_room_layout.removeWidget(self.join_room)
+            if no_room_compact:
+                self.no_room_layout.addWidget(self.create_room, 0, 0)
+                self.no_room_layout.addWidget(self.join_room, 1, 0)
+            else:
+                self.no_room_layout.addWidget(self.create_room, 0, 0)
+                self.no_room_layout.addWidget(self.join_room, 0, 1)
+
     def _request_collapsed(self, collapsed: bool) -> None:
         setter = getattr(self.controller, "set_panel_collapsed", None)
         if callable(setter):
             setter(collapsed)
         else:
             self.set_collapsed(collapsed)
+
+    def _show_dialog_page(self, page: str) -> None:
+        self.controller.show_dialog(page=page)
+
+    def _open_goal_editor(self, kind: str) -> None:
+        if self.goal_editor is not None:
+            if self.goal_editor.kind == kind:
+                self.goal_editor.raise_()
+                self.goal_editor.input.setFocus()
+                return
+            self.goal_editor.close()
+        anchor = self.own_time if kind == "time" else self.own_answers
+        self.goal_editor = GoalEditor(self, kind, anchor)
+        self.goal_editor.open_near_anchor()
 
     def set_collapsed(self, collapsed: bool) -> None:
         self.collapsed = bool(collapsed)
@@ -927,10 +1177,16 @@ class StudyPanel(QWidget):
         return self.tr(ko, en)
 
     def update_status_dot(self, dot: QLabel, status: str) -> None:
-        dot.setText("●" if status == "studying" else "○")
-        dot.setStyleSheet(f"color: {self.active_green()};" if status == "studying" else "")
+        dark = self.palette().color(QPalette.ColorRole.Window).lightness() < 128
+        color = self.active_green() if status == "studying" else (
+            "#91b4d8" if dark else "#476f99"
+        )
+        dot.setText("●")
+        dot.setStyleSheet(f"color: {color}; font-size: 8px;")
+        dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
         dot.setAccessibleName(self.status_text(status))
-        dot.setVisible(status in ("studying", "online"))
+        dot.setToolTip(self.status_text(status))
+        dot.setVisible(status in ("studying", "online", "paused"))
 
     def member_name(self, member: dict) -> str:
         display = getattr(self.controller, "display_member_name", None)
@@ -983,6 +1239,23 @@ class StudyPanel(QWidget):
         self._refresh_history(_now())
 
     def _handle_error_action(self) -> None:
+        if self._record_issue:
+            self.retry.setEnabled(False)
+            if self._record_issue in ("local_read", "local_save"):
+                if self._record_issue == "local_read":
+                    self.controller.review_dirty = True
+                    self.controller.review_upload_requested = True
+                    self.controller.refresh_review_history()
+                else:
+                    try:
+                        self.controller.save()
+                    except Exception:
+                        self.refresh()
+                        return
+                    self.refresh()
+                return
+            self.controller.sync_async(force=True)
+            return
         if self.controller.online.get("review_error"):
             self.controller.review_dirty = True
             self.controller.review_upload_requested = True
@@ -994,6 +1267,26 @@ class StudyPanel(QWidget):
             self.refresh()
             return
         self.controller.sync_async(force=True)
+
+    def _record_status(self) -> dict:
+        snapshot = getattr(self.controller, "record_status_snapshot", None)
+        if not callable(snapshot):
+            return {}
+        try:
+            return snapshot() or {}
+        except Exception:
+            return {}
+
+    def _record_issue_text(self, issue: str | None) -> str:
+        labels = {
+            "local_save": ("기록 저장 실패", "Could not save records"),
+            "local_read": ("기록 확인 실패", "Could not read records"),
+            "upload": ("공유 지연", "Upload delayed"),
+            "members": ("조회 지연", "Refresh delayed"),
+            "pending": ("공유 대기", "Pending upload"),
+        }
+        ko, en = labels.get(issue, ("", ""))
+        return self.tr(ko, en)
 
     def _set_history_mode(self, mode: str) -> None:
         self.history_mode = mode
@@ -1232,7 +1525,8 @@ class StudyPanel(QWidget):
         self.update_collapse_controls()
         current = _now()
         tracker = self.controller.tracker
-        record = self.controller.study_record(current)
+        review_record = self.controller.study_record(current)
+        live_record = tracker.today(current)
         group = self.controller.online.get("group")
         raw_members = self.controller.online.get("members")
         my_id = (self.controller.online.get("auth") or {}).get("user_id")
@@ -1288,8 +1582,8 @@ class StudyPanel(QWidget):
         self.own_activity_timeline.update_activity(my_total or {})
         self.own_title.setToolTip(
             self.tr(
-                f"Anki 복습 기록 기준 · {self.room_day_label()}에 새 공부일 시작\n모바일 기록은 모바일과 PC의 Anki 동기화 후 반영됩니다.\n시간은 Anki가 저장한 답변 시간이며 실행 중인 타이머가 아닙니다.",
-                f"Anki review history · new study day at {self.room_day_label()}\nMobile reviews appear after syncing Anki on mobile and PC.\nTime is recorded answer time, not a running stopwatch.",
+                f"PC 공부 시간은 실시간으로 표시되며 1분 동안 입력이 없으면 멈춥니다.\n{self.room_day_label()}에 새 공부일이 시작됩니다. 모바일 답변은 Anki 동기화 후 반영됩니다.",
+                f"PC study time updates live and pauses after 1 minute without input.\nA new study day starts at {self.room_day_label()}. Mobile answers appear after Anki sync.",
             )
         )
         own_status = self.status_text(
@@ -1300,21 +1594,27 @@ class StudyPanel(QWidget):
             self.own_dot, "online" if tracker.status == "stopped" else tracker.status
         )
 
-        own_record = my_total if group else record
-        seconds = max(0, int((own_record or {}).get("active_seconds" if group else "seconds") or 0))
+        # Live PC time advances every tick; synced review answers can include mobile.
+        seconds = max(0, int(live_record.get("seconds") or 0))
         time_value = self.format_clock(seconds)
         time_goal = max(0, int(tracker.time_goal_minutes or 0))
-        answer_value = max(0, int((own_record or {}).get("answer_count" if group else "answers") or 0))
-        answer_goal = max(0, int(tracker.card_goal or 0))
-        pending = bool(group and not my_total)
-        self.set_metric(self.own_time, "—" if pending else time_value,
-                        self.format_clock(time_goal * 60) if time_goal and not pending else None)
-        self.set_metric(self.own_answers, "—" if pending else str(answer_value),
-                        str(answer_goal) if answer_goal and not pending else None)
-        self.time_caption.setText(
-            self.tr("동기화 대기", "Awaiting sync") if pending
-            else self.tr("공부 시간", "Study time")
+        answer_value = max(
+            0,
+            int(review_record.get("answers") or 0),
+            int(live_record.get("answers") or 0),
         )
+        answer_goal = max(0, int(tracker.card_goal or 0))
+        self.set_metric(self.own_time, time_value,
+                        self.format_clock(time_goal * 60) if time_goal else None)
+        self.set_metric(self.own_answers, str(answer_value),
+                        str(answer_goal) if answer_goal else None)
+        self.own_time.setToolTip(self.tr("공부 시간 목표 수정", "Edit study time goal"))
+        self.own_answers.setToolTip(self.tr("답변 목표 수정", "Edit answer goal"))
+        time_metric_name = self.own_time.accessibleName()
+        answer_metric_name = self.own_answers.accessibleName()
+        self.own_time.setAccessibleName(f"{self.own_time.toolTip()} · {time_metric_name}")
+        self.own_answers.setAccessibleName(f"{self.own_answers.toolTip()} · {answer_metric_name}")
+        self.time_caption.setText(self.tr("공부 시간", "Study time"))
         self.answer_caption.setText(self.tr("답변", "Answers"))
 
         self.people_caption.setText(self.tr("친구", "Friends"))
@@ -1323,12 +1623,14 @@ class StudyPanel(QWidget):
         self._refresh_members(members)
         self.member_body.setVisible(bool(members))
         self.member_empty.setVisible(not members)
+        self.no_room_actions.setVisible(not group)
+        self.create_room.setText(self.tr("방 만들기", "Create room"))
+        self.join_room.setText(self.tr("코드로 참여", "Join with a code"))
         if members:
             self.member_empty.clear()
         elif not group:
-            self.member_empty.setText(
-                self.tr("방을 만들거나 초대 코드로 참가하세요.", "Create a room or join with an invite code.")
-            )
+            self.member_empty.clear()
+            self.member_empty.hide()
         elif not members_known:
             self.member_empty.setText(self.tr("친구 기록 확인 중", "Checking friend records"))
         else:
@@ -1342,18 +1644,27 @@ class StudyPanel(QWidget):
         if self.history_toggle.isChecked():
             self._refresh_history(current)
 
+        status = self._record_status()
+        self._record_issue = status.get("primary_issue")
         retryable = self.controller.online.get("review_error") or self.controller.online.get("last_error")
-        error = retryable or self.controller.online.get("recovery_notice")
+        error = self._record_issue or retryable or self.controller.online.get("recovery_notice")
         self.error_box.setVisible(bool(error))
         if error:
+            issue_text = self._record_issue_text(self._record_issue)
             self.error_text.setText(
-                self.tr("동기화 지연", "Sync delayed") if retryable
-                else str(error)
+                issue_text or (self.tr("동기화 지연", "Sync delayed") if retryable else str(error))
             )
-            self.error_text.setToolTip(str(error))
+            issue_detail = (status.get("errors") or {}).get(self._record_issue)
+            self.error_text.setToolTip(str(issue_detail or retryable or error))
+            self.error_text.setEnabled(bool(self._record_issue))
             self.retry.setText(
-                self.tr("재시도", "Retry") if retryable
+                self.tr("재시도", "Retry") if (self._record_issue or retryable)
                 else self.tr("확인", "Dismiss")
             )
-            self.retry.setVisible(True)
+            self.retry.setVisible(self._record_issue != "pending")
+            busy = bool(
+                getattr(self.controller, "sync_in_flight", False)
+                or getattr(self.controller, "review_query_in_flight", False)
+            )
+            self.retry.setEnabled(not busy)
         self._apply_responsive_layout()

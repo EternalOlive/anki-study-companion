@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -218,6 +219,7 @@ class FakeController:
         self.cancelled_identity = 0
         self.discarded_outboxes = []
         self.applied_time_zones = []
+        self.status_errors = {}
         self.pending = None
 
     def _access_token(self):
@@ -232,14 +234,80 @@ class FakeController:
     def sync_async(self, force=False):
         self.synced.append(force)
 
+    def update_local_settings(
+        self,
+        *,
+        time_goal_minutes=None,
+        card_goal=None,
+        locale=None,
+        share_deck_name=None,
+    ):
+        if time_goal_minutes is not None:
+            self.tracker.time_goal_minutes = time_goal_minutes
+        if card_goal is not None:
+            self.tracker.card_goal = card_goal
+        if locale is not None:
+            self.locale = locale
+        if share_deck_name is not None:
+            self.online["share_deck_name"] = share_deck_name
+        self.save()
+        self.refresh()
+        self.sync_async(force=True)
+        return True
+
+    def record_status_snapshot(self):
+        room = self.online.get("group") or {}
+        stamp = time.time()
+        return {
+            "local_read_at": stamp,
+            "local_save_at": stamp,
+            "upload_at": stamp if room else None,
+            "members_at": stamp if room else None,
+            "pending_count": 0,
+            "oldest_pending_age_seconds": None,
+            "errors": dict(self.status_errors),
+            "primary_issue": next(iter(self.status_errors), None),
+        }
+
+    def invite_message(self, setup_url=None):
+        group = self.online.get("group") or {}
+        name = group.get("name") or "Study room"
+        code = group.get("invite_code") or ""
+        if self.locale == "en":
+            return f"Anki study room · {name}\nInvite code: {code}\nStudy panel → Join with a code → enter {code}"
+        return f"Anki 스터디방 · {name}\n초대 코드: {code}\n스터디 패널 → 코드로 참여 → {code} 입력"
+
     def ensure_online_identity(self):
         self.identity_attempts += 1
+
+    def restart_expired_guest(self):
+        if self._access_token() or not self.online.get("guest_id"):
+            return False
+        self.online.pop("auth", None)
+        self.online.pop("guest_id", None)
+        self.online.pop("group", None)
+        self.online.pop("members", None)
+        self.ensure_online_identity()
+        return True
 
     def _cancel_identity_bootstrap(self):
         self.cancelled_identity += 1
 
     def discard_room_outbox(self, user_id, group_id):
         self.discarded_outboxes.append((user_id, group_id))
+
+    def leave_current_room_locally(self, user_id, group_id):
+        current = self.online.get("group") or {}
+        current_user = (self.online.get("auth") or {}).get("user_id")
+        if current_user != user_id or current.get("id") != group_id:
+            return False
+        self.discard_room_outbox(user_id, group_id)
+        self.online.pop("group", None)
+        self.online.pop("members", None)
+        self.apply_room_time_zone("Asia/Seoul")
+        self.save()
+        self.refresh()
+        return True
 
     def apply_room_time_zone(self, time_zone):
         self.applied_time_zones.append(time_zone)
@@ -323,32 +391,50 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     dialog = _fresh_dialog(SettingsDialog, controller)
     app.processEvents()
 
+    assert [dialog.home_tabs.tabText(index) for index in range(3)] == [
+        "Room", "My settings", "Account"
+    ]
+    for scroll in (dialog.room_tab, dialog.settings_tab, dialog.account_tab):
+        assert scroll.widgetResizable()
+        assert scroll.horizontalScrollBarPolicy().name == "ScrollBarAlwaysOff"
+    dialog.home_tabs.setCurrentIndex(dialog.TAB_SETTINGS)
+    dialog.resize(470, 420)
+    app.processEvents()
+    assert dialog.settings_tab.verticalScrollBar().maximum() > 0
+    assert dialog.home_buttons.isVisible()
+    assert not dialog.close_button.isVisible()
+
     assert dialog.time_goal.value() == 300
     assert dialog.answer_goal.value() == 800
     assert dialog.language.currentData() == "en"
-    assert not dialog.share_deck_name.isChecked()
+    assert dialog.share_deck_name.isChecked()
     assert not dialog.save_button.isEnabled()
 
     dialog.time_goal.setValue(320)
     dialog.answer_goal.setValue(850)
     dialog.language.setCurrentIndex(dialog.language.findData("ko"))
-    dialog.share_deck_name.setChecked(True)
+    dialog.share_deck_name.setChecked(False)
     dialog.show_account()
+    assert dialog.home_tabs.currentIndex() == dialog.TAB_ACCOUNT
     dialog.show_home()
+    dialog.home_tabs.setCurrentIndex(dialog.TAB_SETTINGS)
     assert dialog.time_goal.value() == 320
     assert dialog.answer_goal.value() == 850
     assert dialog.language.currentData() == "ko"
-    assert dialog.share_deck_name.isChecked()
+    assert not dialog.share_deck_name.isChecked()
     assert controller.locale == "en"
 
-    home_text = _visible_text(dialog, QtWidgets)
-    assert "오늘" not in home_text and "Today" not in home_text
-    assert "멤버" not in home_text and "Members" not in home_text
-    assert "04:00" in home_text
-    assert "Card contents are not shared" in home_text
+    settings_text = _visible_text(dialog, QtWidgets)
+    assert "오늘" not in settings_text and "Today" not in settings_text
+    assert "04:00" in settings_text
+    assert "Card contents are not shared" in settings_text
+    dialog.home_tabs.setCurrentIndex(dialog.TAB_ROOM)
+    room_text = _visible_text(dialog, QtWidgets)
+    assert dialog.close_button.isVisible()
+    assert not dialog.home_buttons.isVisible()
     assert not re.search(
         r"\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b",
-        home_text,
+        room_text,
         re.IGNORECASE,
     )
 
@@ -356,7 +442,7 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     assert controller.tracker.time_goal_minutes == 320
     assert controller.tracker.card_goal == 850
     assert controller.locale == "ko"
-    assert controller.online["share_deck_name"] is True
+    assert controller.online["share_deck_name"] is False
     assert controller.saved == 1 and controller.refreshed == 1
     assert controller.synced == [True]
     dialog.close()
@@ -365,12 +451,66 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     cancel_dialog = _fresh_dialog(SettingsDialog, cancel_controller)
     cancel_dialog.time_goal.setValue(15)
     cancel_dialog.language.setCurrentIndex(cancel_dialog.language.findData("en"))
-    cancel_dialog.share_deck_name.setChecked(True)
+    cancel_dialog.share_deck_name.setChecked(False)
     cancel_dialog.reject()
     assert cancel_controller.tracker.time_goal_minutes == 60
     assert cancel_controller.locale == "ko"
     assert "share_deck_name" not in cancel_controller.online
     assert cancel_controller.saved == 0
+
+    stale_controller = FakeController(locale="ko", minutes=60, answers=100)
+    stale_dialog = _fresh_dialog(SettingsDialog, stale_controller)
+    stale_controller.tracker.time_goal_minutes = 90
+    stale_controller.tracker.card_goal = 120
+    stale_dialog.answer_goal.setValue(130)
+    stale_dialog.language.setCurrentIndex(stale_dialog.language.findData("en"))
+    stale_dialog.save_settings()
+    assert stale_controller.tracker.time_goal_minutes == 90
+    assert stale_controller.tracker.card_goal == 130
+    stale_dialog.close()
+
+
+def check_record_status_and_invite_copy(app, QtWidgets, SettingsDialog):
+    controller = FakeController(locale="ko")
+    controller.online["group"] = {
+        "id": "room-current",
+        "name": "Current room",
+        "invite_code": "C7K9",
+        "owner_id": "user-owner",
+        "time_zone": "Asia/Seoul",
+        "day_start_hour": 4,
+    }
+    controller.status_errors = {
+        "upload": "network request failed",
+        "members": "refresh request failed",
+    }
+    dialog = _fresh_dialog(SettingsDialog, controller)
+    app.processEvents()
+
+    assert not dialog.record_status_details.isVisible()
+    dialog.show_record_status()
+    app.processEvents()
+    assert dialog.record_status_details.isVisible()
+    assert dialog.record_status_toggle.isChecked()
+    assert "Asia/Seoul" in dialog.record_status_zone.text()
+    assert dialog.record_status_rows["upload_at"][0].isVisible()
+    assert dialog.record_status_errors.isVisible()
+    assert "공유 지연" in dialog.record_status_errors.text()
+    assert "조회 지연" in dialog.record_status_errors.text()
+    assert "network request failed" in dialog.record_status_errors.toolTip()
+
+    dialog.copy_invite_message_button.click()
+    app.processEvents()
+    copied = app.clipboard().text()
+    assert "Current room" in copied and "C7K9" in copied
+    assert "user-local" not in copied and "token" not in copied
+    assert dialog.copy_invite_message_button.text() == "복사됨"
+
+    dialog.copy_invite_button.click()
+    app.processEvents()
+    assert app.clipboard().text() == "C7K9"
+    assert dialog.copy_invite_button.text() == "복사됨"
+    dialog.close()
 
 
 def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
@@ -437,10 +577,16 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert not dialog.join_submit.isEnabled()
     controller.finish_remote()
     app.processEvents()
+    if controller.pending is not None:
+        controller.finish_remote()
+        app.processEvents()
     assert controller.online["group"]["id"] == "room-joined"
     assert controller.applied_time_zones == ["Asia/Seoul"]
     assert dialog.pages.currentIndex() == dialog.PAGE_HOME
     assert controller.client.calls[0] == ("join_group", "token", "TMQV")
+    if controller.pending is not None:
+        controller.finish_remote()
+        app.processEvents()
 
     _button(dialog, QtWidgets, "방 나가기").click()
     app.processEvents()
@@ -480,8 +626,11 @@ def check_owner_invite_rotation(app, QtWidgets, SettingsDialog):
     }
     dialog = _fresh_dialog(SettingsDialog, owner)
     app.processEvents()
+    assert owner.pending is not None
+    owner.finish_remote()
+    app.processEvents()
 
-    rotate = _button(dialog, QtWidgets, "새 초대 코드 만들기")
+    rotate = _button(dialog, QtWidgets, "초대 코드 변경")
     dialog._confirm_invite_rotation = lambda: False
     rotate.click()
     assert owner.pending is None
@@ -507,13 +656,20 @@ def check_owner_invite_rotation(app, QtWidgets, SettingsDialog):
     }
     member_dialog = _fresh_dialog(SettingsDialog, member)
     app.processEvents()
+    assert member.pending is not None
+    member.finish_remote()
+    app.processEvents()
     assert not any(
-        button.text() == "새 초대 코드 만들기" and button.isVisible()
+        button.text() == "초대 코드 변경" and button.isVisible()
         for button in member_dialog.home_page.findChildren(QtWidgets.QPushButton)
     )
+    assert any(
+        label.text().startswith("Study Friend") and label.isVisible()
+        for label in member_dialog.members_section.findChildren(QtWidgets.QLabel)
+    )
     assert not any(
-        button.text() == "멤버 관리" and button.isVisible()
-        for button in member_dialog.home_page.findChildren(QtWidgets.QPushButton)
+        button.text() == "내보내기" and button.isVisible()
+        for button in member_dialog.members_section.findChildren(QtWidgets.QPushButton)
     )
     member_dialog.close()
 
@@ -526,14 +682,13 @@ def check_owner_member_management(app, QtWidgets, SettingsDialog):
     }
     dialog = _fresh_dialog(SettingsDialog, owner)
     app.processEvents()
-    _button(dialog, QtWidgets, "멤버 관리").click()
     assert owner.pending is not None
     owner.finish_remote()
     app.processEvents()
     page_text = _visible_text(dialog, QtWidgets)
     assert "Study Friend" in page_text
     assert "차단된 계정" in page_text
-    assert "Owner" not in page_text
+    assert "Owner · 방장" in page_text
 
     remove = _button(dialog, QtWidgets, "내보내기")
     dialog._confirm_member_removal = lambda _name: True
@@ -548,11 +703,6 @@ def check_owner_member_management(app, QtWidgets, SettingsDialog):
     owner.finish_remote()
     assert ("moderate_group_member", "token", "room-owner", "user-blocked", False) in owner.client.calls
 
-    owner.online["group"] = {
-        "id": "other-room", "name": "Other", "owner_id": "someone-else",
-    }
-    dialog.load_members()
-    assert dialog.pages.currentIndex() == dialog.PAGE_HOME
     dialog.close()
 
     stale = FakeController()
@@ -560,14 +710,15 @@ def check_owner_member_management(app, QtWidgets, SettingsDialog):
         "id": "room-owner", "name": "Owner room", "owner_id": "user-local",
     }
     stale_dialog = _fresh_dialog(SettingsDialog, stale)
-    stale_dialog.show_members()
+    app.processEvents()
+    assert stale.pending is not None
     stale.online["auth"]["user_id"] = "different-account"
     stale.finish_remote()
     assert not stale_dialog.members_list_layout.count()
     stale_dialog.close()
 
 
-def check_account_states(app, SettingsDialog):
+def check_account_states(app, QtWidgets, SettingsDialog):
     guest = FakeController(account_kind="guest", token=True)
     guest_dialog = _fresh_dialog(SettingsDialog, guest)
     guest_dialog.show_account()
@@ -604,17 +755,19 @@ def check_account_states(app, SettingsDialog):
     username_dialog.close()
 
     expired = FakeController(account_kind="guest", token=False)
+    expired.online["guest_id"] = "user-local"
     expired_dialog = _fresh_dialog(SettingsDialog, expired)
     expired_dialog.show_account()
     app.processEvents()
     assert "만료" in expired_dialog.account_summary.text()
     assert not expired_dialog.link_email_button.isVisible()
     assert expired_dialog.login_button.isVisible()
+    assert expired_dialog.restart_guest_button.isVisible()
     expired_dialog.show_home()
     app.processEvents()
     retry = next(
         button
-        for button in expired_dialog.home_page.findChildren(type(expired_dialog.account_button))
+        for button in expired_dialog.home_page.findChildren(QtWidgets.QPushButton)
         if button.text() == "다시 시도"
     )
     retry.click()
@@ -654,12 +807,28 @@ def render_screenshots(app, QtGui, QtWidgets, SettingsDialog):
             dialog = _fresh_dialog(SettingsDialog, controller)
             dialog.resize(470, 560)
             app.processEvents()
+            if controller.pending is not None:
+                controller.finish_remote()
+                app.processEvents()
             assert 440 <= dialog.width() <= 480
             target = OUTPUT / f"native-settings-{locale}-{theme}.png"
             if not dialog.grab().save(str(target)):
                 raise RuntimeError(f"could not save {target}")
             artifacts.append(target)
             if theme == "light":
+                dialog.home_tabs.setCurrentIndex(dialog.TAB_SETTINGS)
+                app.processEvents()
+                settings_target = OUTPUT / f"native-settings-options-{locale}.png"
+                if not dialog.grab().save(str(settings_target)):
+                    raise RuntimeError(f"could not save {settings_target}")
+                artifacts.append(settings_target)
+                dialog.home_tabs.setCurrentIndex(dialog.TAB_ACCOUNT)
+                app.processEvents()
+                account_target = OUTPUT / f"native-settings-account-{locale}.png"
+                if not dialog.grab().save(str(account_target)):
+                    raise RuntimeError(f"could not save {account_target}")
+                artifacts.append(account_target)
+                dialog.home_tabs.setCurrentIndex(dialog.TAB_ROOM)
                 dialog.show_leave()
                 app.processEvents()
                 leave_target = OUTPUT / f"native-settings-leave-{locale}.png"
@@ -669,6 +838,37 @@ def render_screenshots(app, QtGui, QtWidgets, SettingsDialog):
             dialog.close()
     _set_palette(app, QtGui, QtWidgets, False)
     return artifacts
+
+
+def check_large_font_copy_layout(app, QtGui, SettingsDialog):
+    previous_font = app.font()
+    app.setFont(QtGui.QFont(previous_font.family(), 14))
+    controller = FakeController(locale="en")
+    controller.online["group"] = {
+        "id": "room-large-font",
+        "name": "Quiet study room",
+        "invite_code": "C7K9",
+        "owner_id": "user-owner",
+        "time_zone": "America/New_York",
+        "day_start_hour": 4,
+    }
+    dialog = _fresh_dialog(SettingsDialog, controller)
+    dialog.resize(440, 760)
+    app.processEvents()
+    if controller.pending is not None:
+        controller.finish_remote()
+        app.processEvents()
+    assert dialog.width() == 440
+    assert dialog.room_invite_code.geometry().bottom() < dialog.copy_invite_button.geometry().top()
+    assert dialog.copy_invite_button.geometry().right() < dialog.width()
+    assert dialog.copy_invite_message_button.geometry().right() < dialog.width()
+    OUTPUT.mkdir(exist_ok=True)
+    target = OUTPUT / "native-settings-en-large-font.png"
+    if not dialog.grab().save(str(target)):
+        raise RuntimeError(f"could not save {target}")
+    dialog.close()
+    app.setFont(previous_font)
+    return target
 
 
 def check_username_account_creation(SettingsDialog, SupabaseError):
@@ -779,13 +979,15 @@ def main():
     app.setFont(QtGui.QFont(family, 9))
 
     check_home_draft_and_save(app, QtWidgets, SettingsDialog)
+    check_record_status_and_invite_copy(app, QtWidgets, SettingsDialog)
     check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
     check_owner_invite_rotation(app, QtWidgets, SettingsDialog)
     check_owner_member_management(app, QtWidgets, SettingsDialog)
-    check_account_states(app, SettingsDialog)
+    check_account_states(app, QtWidgets, SettingsDialog)
     check_username_account_creation(SettingsDialog, SupabaseError)
     check_username_login_and_recovery(SettingsDialog)
     screenshots = render_screenshots(app, QtGui, QtWidgets, SettingsDialog)
+    screenshots.append(check_large_font_copy_layout(app, QtGui, SettingsDialog))
     print("native settings smoke ok")
     for screenshot in screenshots:
         print(f"settings screenshot: {screenshot}")

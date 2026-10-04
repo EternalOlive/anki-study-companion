@@ -46,6 +46,7 @@ def _load_panel_types():
         "QGridLayout",
         "QHBoxLayout",
         "QLabel",
+        "QLineEdit",
         "QPushButton",
         "QScrollArea",
         "QSizePolicy",
@@ -114,6 +115,12 @@ class FakeController:
                 },
             ],
         }
+        self.dialog_pages = []
+        self.status_snapshot = {}
+        self.sync_in_flight = False
+        self.review_query_in_flight = False
+        self.review_dirty = False
+        self.review_upload_requested = False
 
     def t(self, korean, english):
         return english if self.locale == "en" else korean
@@ -124,10 +131,26 @@ class FakeController:
     def display_member_name(self, member):
         return member.get("display_name", "Friend")
 
-    def show_dialog(self):
-        pass
+    def show_dialog(self, *, page=None):
+        self.dialog_pages.append(page)
 
     def sync_async(self, force=False):
+        pass
+
+    def update_daily_goals(self, *, time_goal_minutes=None, card_goal=None):
+        if time_goal_minutes is not None:
+            self.tracker.time_goal_minutes = time_goal_minutes
+        if card_goal is not None:
+            self.tracker.card_goal = card_goal
+        return True
+
+    def record_status_snapshot(self):
+        return self.status_snapshot
+
+    def refresh_review_history(self):
+        pass
+
+    def save(self):
         pass
 
     def study_record(self, current):
@@ -194,6 +217,8 @@ def main() -> int:
     tracker.status = "studying"
 
     controller = FakeController(tracker, current)
+    local_record = {"seconds": 1450, "answers": 48}
+    controller.study_record = lambda current: dict(local_record)
     controller.online["members"].append({
         "user_id": "self", "study_day": today,
         "active_seconds": 30 * 60, "answer_count": 60,
@@ -209,15 +234,17 @@ def main() -> int:
     friend["current_deck_name"] = "영어::<단어>"
     friend["deck_updated_at"] = current.isoformat()
     panel.refresh()
-    assert first_row.details.text().startswith("영어::<단어>")
+    assert first_row.deck.text() == "영어::<단어>"
+    assert first_row.deck.isVisible()
+    assert not first_row.expanded
     friend["deck_updated_at"] = (current - timedelta(seconds=100)).isoformat()
     panel.refresh()
-    assert "<단어>" not in first_row.details.text()
+    assert not first_row.deck.isVisible()
     friend["deck_updated_at"] = current.isoformat()
     friend["status"] = "paused"
     panel.refresh()
     assert "공부 중 아님" not in first_row.details.text()
-    assert "영어" not in first_row.details.text()
+    assert not first_row.deck.isVisible()
     friend["status"] = "studying"
     panel.refresh()
     first_row.identity.click()
@@ -275,10 +302,51 @@ def main() -> int:
     assert len(panel.member_rows) == 2
     assert first_row.dot.text() == "●" and first_row.dot.isVisible()
     online_row = panel.member_rows["friend-b"]
-    assert online_row.dot.text() == "○" and online_row.dot.isVisible()
-    assert online_row.dot.styleSheet() == ""
-    assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
-    assert panel.own_answers.accessibleName() == "60 / 100"
+    assert online_row.dot.text() == "●" and online_row.dot.isVisible()
+    assert "font-size: 8px" in online_row.dot.styleSheet()
+    assert "font-size: 8px" in panel.own_dot.styleSheet()
+    assert online_row.dot.styleSheet() != first_row.dot.styleSheet()
+    assert panel.own_time.accessibleName() == "공부 시간 목표 수정 · 24:10 / 1:00:00"
+    assert panel.own_answers.accessibleName() == "답변 목표 수정 · 48 / 100"
+    cached_members = controller.online["members"]
+    controller.online["members"] = [
+        member for member in cached_members if member.get("user_id") != "self"
+    ]
+    # Live time advances independently of the answer-history snapshot.
+    tracker.records[today]["seconds"] = 1480
+    local_record.update(answers=49)
+    panel.refresh()
+    assert panel.own_time.accessibleName() == "공부 시간 목표 수정 · 24:40 / 1:00:00"
+    assert panel.own_answers.accessibleName() == "답변 목표 수정 · 49 / 100"
+    controller.online["members"] = cached_members
+    tracker.records[today]["seconds"] = 1450
+    local_record.update(answers=48)
+    panel.refresh()
+    first_row = panel.member_rows[first_key]
+    online_row = panel.member_rows["friend-b"]
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtCore import Qt
+    QTest.mouseClick(panel.own_time, Qt.MouseButton.LeftButton)
+    assert panel.goal_editor is not None and panel.goal_editor.kind == "time"
+    panel.goal_editor.input.setText("²")
+    assert not panel.goal_editor.save.isEnabled()
+    panel.goal_editor.input.setText("9999999")
+    assert len(panel.goal_editor.input.text()) == 6
+    assert not panel.goal_editor.save.isEnabled()
+    panel.goal_editor.input.setText("75")
+    panel.refresh()
+    assert panel.goal_editor.input.text() == "75"
+    QTest.keyClick(panel.goal_editor.input, Qt.Key.Key_Return)
+    app.processEvents()
+    assert tracker.time_goal_minutes == 75
+    assert panel.goal_editor is None
+    QTest.mouseClick(panel.own_answers, Qt.MouseButton.LeftButton)
+    assert panel.goal_editor is not None and panel.goal_editor.kind == "answers"
+    QTest.keyClick(panel.goal_editor, Qt.Key.Key_Escape)
+    app.processEvents()
+    assert panel.goal_editor is None
+    tracker.time_goal_minutes = 60
+    panel.refresh()
     mine = next(m for m in controller.online["members"] if m["user_id"] == "self")
     mine.update(activity_known=True, activity_buckets=[
         {"slot": 30, "answer_count": 4, "time_ms": 72000},
@@ -301,7 +369,7 @@ def main() -> int:
     mine["study_day"] = today
     panel.own_activity_toggle.click()
     panel.refresh()
-    assert "Anki 복습 기록" in panel.own_title.toolTip()
+    assert "PC 공부 시간" in panel.own_title.toolTip()
     assert "모바일" in panel.own_title.toolTip()
     assert panel.time_caption.text() == "공부 시간"
     assert panel.answer_caption.text() == "답변"
@@ -312,6 +380,25 @@ def main() -> int:
     assert panel.format_clock(3599) == "59:59"
     assert panel.format_clock(0) == "00:00"
     assert panel.format_clock(36000) == "10:00:00"
+    controller.status_snapshot = {
+        "primary_issue": "upload",
+        "errors": {"upload": "timeout"},
+    }
+    panel.refresh()
+    assert panel.error_text.text() == "공유 지연"
+    assert panel.retry.isVisible() and panel.retry.isEnabled()
+    panel.error_text.click()
+    assert controller.dialog_pages[-1] == "record_status"
+    controller.sync_in_flight = True
+    panel.refresh()
+    assert not panel.retry.isEnabled()
+    controller.sync_in_flight = False
+    controller.status_snapshot = {"primary_issue": "pending", "errors": {}}
+    panel.refresh()
+    assert panel.error_text.text() == "공유 대기"
+    assert not panel.retry.isVisible()
+    controller.status_snapshot = {}
+    panel.refresh()
     # A friend without deck/goals can still open the activity timeline; stale
     # time is shown once in the summary.
     empty_friend = dict(online_row.member, status="offline", time_goal_minutes=0,
@@ -339,8 +426,6 @@ def main() -> int:
     assert online_row.time.text() == "—" and online_row.answers.text() == "—"
     online_row.update_member(controller.online["members"][1])
     # Clicking the numeric side of the row and keyboard Space both toggle details.
-    from PyQt6.QtTest import QTest
-    from PyQt6.QtCore import Qt
     panel.weekly_days[-1].setFocus()
     QTest.keyClick(panel.weekly_days[-1], Qt.Key.Key_Space)
     assert panel.weekly_day_detail.isVisible()
@@ -379,9 +464,9 @@ def main() -> int:
     assert panel.member_order == original_order
     assert first_row.expanded and first_row.details.isVisible()
     assert panel.own_title.text() == "You · today"
-    assert "Anki review history" in panel.own_title.toolTip()
-    assert first_row.details.text().startswith("영어::<단어>")
-    assert panel.own_time.accessibleName() == "30:00 / 1:00:00"
+    assert "PC study time updates live" in panel.own_title.toolTip()
+    assert first_row.deck.text() == "영어::<단어>"
+    assert panel.own_time.accessibleName() == "Edit study time goal · 24:10 / 1:00:00"
     assert panel.history_toggle.isChecked()
     assert panel.weekly_title.text() == "Recent 7 days"
     assert "today in progress" in panel.weekly_days[-1].accessibleName()
@@ -408,10 +493,28 @@ def main() -> int:
     panel.refresh()
     app.processEvents()
     assert "5:00:00" in panel.own_time.accessibleName()
-    assert "#eeeeee" in first_row.identity_text.styleSheet()
+    expected_foreground = panel.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
+    assert expected_foreground in first_row.identity_text.styleSheet()
     assert panel.grab().save(str(OUTPUT / "native-ko-dark.png"))
     tracker.time_goal_minutes = 60
     app.setPalette(original_palette)
+
+    saved_group = controller.online["group"]
+    saved_members = controller.online["members"]
+    controller.online["group"] = None
+    controller.online["members"] = None
+    no_room = StudyPanel(controller)
+    no_room.resize(280, 500)
+    no_room.show()
+    app.processEvents()
+    assert no_room.no_room_actions.isVisible()
+    assert not no_room.member_empty.isVisible()
+    no_room.create_room.click()
+    no_room.join_room.click()
+    assert controller.dialog_pages[-2:] == ["create", "join"]
+    no_room.close()
+    controller.online["group"] = saved_group
+    controller.online["members"] = saved_members
 
     panel.close()
 
@@ -449,6 +552,13 @@ def main() -> int:
     assert large_row.identity.toolTip().startswith("아침마다도서관")
     assert large.own_time.geometry().right() <= large.content.width()
     assert large.own_answers.geometry().right() <= large.content.width()
+    QTest.keyClick(large.own_time, Qt.Key.Key_Return)
+    app.processEvents()
+    assert large.goal_editor is not None
+    available = large.own_time.screen().availableGeometry()
+    assert available.contains(large.goal_editor.geometry().topLeft())
+    assert available.contains(large.goal_editor.geometry().bottomRight())
+    QTest.keyClick(large.goal_editor, Qt.Key.Key_Escape)
     assert large_unknown_row.activity_timeline.isVisible()
     assert "시간대 기록 없음" in large_unknown_row.activity_timeline.accessibleName()
     assert large.weekly_days[-1].width() >= 20

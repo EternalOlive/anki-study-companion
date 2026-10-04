@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -33,6 +35,18 @@ from .online import (
 )
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
 from .outbox import SyncOutbox
+from .record_status import (
+    LOCAL_READ,
+    LOCAL_SAVE,
+    RecordStatusLedger,
+    merge_pending_summaries,
+)
+from .ux_services import (
+    ANSWER_GOAL_MAX,
+    TIME_GOAL_MAX_MINUTES,
+    build_invite_message,
+    validate_goal,
+)
 from .activity import weekly_activity
 from .reviews import ReviewHistory
 from .study_day import (
@@ -53,12 +67,78 @@ def now() -> datetime:
     return datetime.now(TIMEZONE)
 
 
+class ConfigReadError(OSError):
+    """The existing profile state could not be trusted and must not be replaced."""
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    try:
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    _atomic_write_bytes(path, payload.encode("utf-8"))
+
+
+def _load_config(path: Path) -> tuple[dict, ConfigReadError | None]:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {}, None
+    except OSError as error:
+        return {}, ConfigReadError(f"설정 파일을 읽지 못했습니다: {error}")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("top-level JSON value must be an object")
+        for key in (
+            "online", "records", "deck_records", "review_history",
+            "legacy_tracker_records", "ui_state", "record_namespaces",
+        ):
+            if key in data and not isinstance(data[key], dict):
+                raise ValueError(f"{key} must be an object")
+        return data, None
+    except (UnicodeError, ValueError, TypeError) as error:
+        backup = path.with_name(path.name + ".corrupt-backup")
+        try:
+            _atomic_write_bytes(backup, raw)
+        except OSError:
+            # The original remains authoritative and untouched even when a
+            # diagnostic backup cannot be written.
+            pass
+        return {}, ConfigReadError(f"설정 파일이 손상되었습니다: {error}")
+
+
+def _not_group_member_error(error) -> bool:
+    return str(error).strip().casefold() == "not a member of this group"
+
+
+def _continue_after_review_batch_error(error) -> bool:
+    """Skip only deterministic batch errors; transport/server failures back off."""
+    if "review day archived" in str(error).casefold():
+        return True
+    return getattr(error, "status", None) in (400, 409, 422)
+
+
 class InputWatcher(QObject):
     def __init__(self, controller):
         super().__init__(mw)
         self.controller = controller
 
     def eventFilter(self, watched, event):
+        if watched is mw and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            self.controller._position_panel_expand()
         if mw.state == "review":
             if event.type() in (
                 QEvent.Type.KeyPress,
@@ -84,10 +164,7 @@ class InputWatcher(QObject):
 class Controller:
     def __init__(self):
         self.path = Path(mw.pm.profileFolder()) / "study_companion.json"
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, ValueError, OSError):
-            data = {}
+        data, self.config_read_error = _load_config(self.path)
         self.online = data.get("online", {})
         initial_time_zone = room_time_zone(self.online.get("group"))
         self.study_day_scheme = f"room-04-v1|{initial_time_zone}"
@@ -137,6 +214,11 @@ class Controller:
         self.device_ledger.bind_device(self.device_id)
         self.sync_outbox = SyncOutbox(self.online.setdefault("sync_outbox", {}))
         self.sync_outbox.bind_device(self.device_id)
+        self.record_status = RecordStatusLedger(
+            self.online.setdefault("record_status", {})
+        )
+        if self.config_read_error is not None:
+            self.record_status.set_error(LOCAL_READ, self.config_read_error)
         self.locale = data.get("language", "ko" if lang.current_lang.startswith("ko") else "en")
         if self.locale not in ("ko", "en"):
             self.locale = "ko"
@@ -150,6 +232,9 @@ class Controller:
         self._last_member_fetch_at = 0
         self.identity_in_flight = False
         self.identity_generation = 0
+        self._auth_refresh_lock = threading.Lock()
+        self._auth_refresh_cache = {}
+        self._auth_persistence_error = None
         self.closed = False
         self.label = QLabel(mw)
         mw.statusBar().addPermanentWidget(self.label)
@@ -174,11 +259,13 @@ class Controller:
             settings_dialog.reject()
         self._cancel_identity_bootstrap()
         self.tracker.leave_review(now())
-        self.save()
+        try:
+            self.save()
+        except ConfigReadError:
+            pass
         self.timer.stop()
         QApplication.instance().removeEventFilter(self.watcher)
         mw.statusBar().removeWidget(self.label)
-        mw.statusBar().removeWidget(self.panel_expand)
         self.panel_expand.deleteLater()
         mw.form.menuTools.removeAction(self.action)
         mw.form.menuTools.removeAction(self.panel_action)
@@ -186,17 +273,115 @@ class Controller:
         self.panel.deleteLater()
 
     def save(self):
-        data = self.tracker.snapshot()
-        data["online"] = self.online
-        data["language"] = self.locale
-        data["ui_state"] = self.ui_state
-        data["review_history"] = self.review_history.state
-        data["study_day_scheme"] = self.study_day_scheme
-        data["legacy_tracker_records"] = self.legacy_tracker_records
-        payload = json.dumps(data, ensure_ascii=False)
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(payload, encoding="utf-8")
-        temporary.replace(self.path)
+        config_read_error = getattr(self, "config_read_error", None)
+        if config_read_error is not None:
+            self.record_status.set_error(LOCAL_READ, config_read_error)
+            self.record_status.set_error(LOCAL_SAVE, config_read_error)
+            raise config_read_error
+        previous_save = self.record_status.success_at(LOCAL_SAVE)
+        self.record_status.mark_success(LOCAL_SAVE)
+        try:
+            data = self.tracker.snapshot()
+            data["online"] = self.online
+            data["language"] = self.locale
+            data["ui_state"] = self.ui_state
+            data["review_history"] = self.review_history.state
+            data["study_day_scheme"] = self.study_day_scheme
+            data["legacy_tracker_records"] = self.legacy_tracker_records
+            payload = json.dumps(data, ensure_ascii=False)
+            _atomic_write_text(self.path, payload)
+        except Exception as error:
+            self.record_status.restore_success(LOCAL_SAVE, previous_save)
+            self.record_status.set_error(LOCAL_SAVE, error)
+            raise
+        self.record_status.clear_error(LOCAL_SAVE)
+        self._auth_persistence_error = None
+
+    def update_daily_goals(self, *, time_goal_minutes=None, card_goal=None):
+        """Persist a partial goal edit through the same offline-safe sync path."""
+        return self.update_local_settings(
+            time_goal_minutes=time_goal_minutes, card_goal=card_goal
+        )
+
+    def update_local_settings(
+        self, *, time_goal_minutes=None, card_goal=None, locale=None,
+        share_deck_name=None,
+    ):
+        """Commit only explicitly edited fields, including settings-dialog drafts."""
+        updates = {}
+        if time_goal_minutes is not None:
+            updates["time_goal_minutes"] = validate_goal(
+                time_goal_minutes, maximum=TIME_GOAL_MAX_MINUTES
+            )
+        if card_goal is not None:
+            updates["card_goal"] = validate_goal(
+                card_goal, maximum=ANSWER_GOAL_MAX
+            )
+        previous = {
+            "time_goal_minutes": self.tracker.time_goal_minutes,
+            "card_goal": self.tracker.card_goal,
+        }
+        previous_locale = self.locale
+        had_share = "share_deck_name" in self.online
+        previous_share = self.online.get("share_deck_name")
+        if locale is not None and locale not in ("ko", "en"):
+            raise ValueError("invalid language")
+        if share_deck_name is not None and not isinstance(share_deck_name, bool):
+            raise ValueError("invalid sharing preference")
+        changed = any(getattr(self.tracker, key) != value for key, value in updates.items())
+        changed |= locale is not None and locale != self.locale
+        changed |= share_deck_name is not None and share_deck_name != bool(previous_share)
+        if not changed:
+            return False
+        for key, value in updates.items():
+            setattr(self.tracker, key, value)
+        if locale is not None:
+            self.locale = locale
+        if share_deck_name is not None:
+            self.online["share_deck_name"] = share_deck_name
+        try:
+            self.save()
+        except Exception:
+            self.tracker.time_goal_minutes = previous["time_goal_minutes"]
+            self.tracker.card_goal = previous["card_goal"]
+            self.locale = previous_locale
+            if had_share:
+                self.online["share_deck_name"] = previous_share
+            else:
+                self.online.pop("share_deck_name", None)
+            raise
+        self.refresh()
+        self.sync_async(force=True)
+        return True
+
+    def invite_message(self, setup_url=None):
+        return build_invite_message(
+            dict(self.online.get("group") or {}), self.locale, setup_url
+        )
+
+    def record_status_snapshot(self):
+        auth = self.online.get("auth") or {}
+        group = self.online.get("group") or {}
+        user_id = auth.get("user_id")
+        group_id = group.get("id")
+        pending = None
+        if user_id and group_id:
+            clock_now = time.time()
+            recent_day = (
+                study_day(now(), self.tracker.time_zone) - timedelta(days=1)
+            ).isoformat()
+            pending = merge_pending_summaries(
+                self.sync_outbox.pending_summary(
+                    user_id=user_id, group_id=group_id, device_id=self.device_id,
+                    now=clock_now,
+                ),
+                self.review_history.pending_summary(
+                    user_id, group_id, since_day=recent_day, now=clock_now
+                ),
+            )
+        return self.record_status.snapshot(
+            user_id=user_id, group_id=group_id, pending=pending
+        )
 
     def tick(self):
         self.tracker.tick(now())
@@ -247,8 +432,14 @@ class Controller:
             self.sync_async(force=True)
 
     def refresh(self):
-        record = self.study_record(now())
-        duration = self.panel_body.format_clock(int(record["seconds"]))
+        current = now()
+        review_record = self.study_record(current)
+        live_record = self.tracker.today(current)
+        duration = self.panel_body.format_clock(int(live_record["seconds"]))
+        answers = max(
+            int(review_record.get("answers") or 0),
+            int(live_record.get("answers") or 0),
+        )
         status = {"studying": self.t("공부 중", "Studying"), "paused": self.t("잠시 멈춤", "Paused"), "stopped": self.t("접속 중", "Online")}[
             self.tracker.status
         ]
@@ -256,7 +447,7 @@ class Controller:
         card_goal = f"/{self.tracker.card_goal}" if self.tracker.card_goal else ""
         self.label.setText(
             f"{self.t('오늘', 'Today')} {duration}{time_goal}  "
-            f"{self.t('답변', 'Answers')} {record['answers']}{card_goal}  {status}"
+            f"{self.t('답변', 'Answers')} {answers}{card_goal}  {status}"
         )
         self.refresh_panel()
 
@@ -384,6 +575,9 @@ class Controller:
                 "record": weekly,
             }
             self.online.pop("review_error", None)
+            status_ledger = getattr(self, "record_status", None)
+            if status_ledger is not None:
+                status_ledger.mark_success(LOCAL_READ)
             try:
                 self.save()
             except OSError:
@@ -404,6 +598,9 @@ class Controller:
                 self.review_allow_removals |= allow_removals
                 self.review_upload_requested |= upload_requested
             self.online["review_error"] = self.t("Anki 학습 기록을 읽지 못했습니다", "Could not read Anki review history")
+            status_ledger = getattr(self, "record_status", None)
+            if status_ledger is not None:
+                status_ledger.set_error(LOCAL_READ, error)
 
         try:
             QueryOp(parent=mw, op=query, success=success).failure(failure).run_in_background()
@@ -454,10 +651,8 @@ class Controller:
         self.panel_body = StudyPanel(self)
         title_bar = QWidget(self.panel)
         title_layout = QHBoxLayout(title_bar)
-        title_layout.setContentsMargins(2, 0, 2, 0)
+        title_layout.setContentsMargins(0, 2, 4, 2)
         title_layout.addStretch()
-        # Keep the collapse control outside scrollable content, even in a
-        # narrow window where the study details need horizontal scrolling.
         title_layout.addWidget(self.panel_body.collapse_panel)
         self.panel.setTitleBarWidget(title_bar)
         self.panel_scroll = QScrollArea(self.panel)
@@ -467,8 +662,9 @@ class Controller:
         self.panel.setWidget(self.panel_scroll)
         mw.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.panel)
         self.panel_expand = PanelToggleButton(mw, expand=True)
-        self.panel_expand.clicked.connect(lambda: self.set_panel_collapsed(False))
-        mw.statusBar().addPermanentWidget(self.panel_expand)
+        self.panel_expand.clicked.connect(
+            lambda: self.set_panel_collapsed(self.panel.isVisible())
+        )
         self.panel_expand.hide()
         self.panel_action = self.panel.toggleViewAction()
         self.panel_action.triggered.connect(lambda visible: self.set_panel_collapsed(not visible))
@@ -480,6 +676,14 @@ class Controller:
             ) if not self.closed else None
         )
 
+    def _position_panel_expand(self):
+        button = getattr(self, "panel_expand", None)
+        if button is None:
+            return
+        button.move(max(0, mw.width() - button.width() - 4), mw.menuBar().height() + 2)
+        if button.isVisible():
+            button.raise_()
+
     def set_panel_collapsed(self, collapsed, *, persist=True):
         collapsed = bool(collapsed)
         was_hidden = not self.panel.isVisible()
@@ -489,7 +693,9 @@ class Controller:
                 self.ui_state["panel_width"] = current_width
             self.panel.hide()
             self.panel_expand.show()
+            self._position_panel_expand()
         else:
+            self.panel_expand.hide()
             self.panel.setMaximumWidth(16777215)
             self.panel.setMinimumWidth(0)
             self.panel_body.set_collapsed(False)
@@ -497,10 +703,16 @@ class Controller:
             target_width = min(max(160, int(self.ui_state.get("panel_width") or 320)),
                                max(160, mw.width() // 2))
             self.panel.show()
-            self.panel_expand.hide()
             mw.resizeDocks([self.panel], [target_width], Qt.Orientation.Horizontal)
             self.panel_body.refresh()
         self.ui_state["panel_collapsed"] = collapsed
+        self.panel_expand.expand = collapsed
+        self.panel_expand.setToolTip(self.t(
+            "스터디 패널 펼치기" if collapsed else "스터디 패널 접기",
+            "Show study panel" if collapsed else "Hide study panel",
+        ))
+        self.panel_expand.setAccessibleName(self.panel_expand.toolTip())
+        self.panel_expand.update()
         if persist:
             self.save()
         if not collapsed and was_hidden and persist:
@@ -512,21 +724,28 @@ class Controller:
             "" if self.panel_body.collapsed else self.t("스터디", "Study")
         )
         self.panel_action.setText(self.t("스터디 패널", "Study panel"))
-        self.panel_expand.setToolTip(self.t("스터디 패널 펼치기", "Show study panel"))
+        self.panel_expand.setToolTip(self.t(
+            "스터디 패널 접기" if self.panel.isVisible() else "스터디 패널 펼치기",
+            "Hide study panel" if self.panel.isVisible() else "Show study panel",
+        ))
         self.panel_expand.setAccessibleName(self.panel_expand.toolTip())
         if self.panel.isVisible():
             self.panel_body.refresh()
 
-    def show_dialog(self):
+    def show_dialog(self, checked=False, *, page=None):
         if self.closed:
             return
         existing = getattr(self, "_settings_dialog", None)
         if existing is not None:
+            if page in ("create", "join", "record_status"):
+                getattr(existing, "show_" + page)()
             existing.raise_()
             existing.activateWindow()
             return
         from .settings import SettingsDialog
         dialog = SettingsDialog(self, mw)
+        if page in ("create", "join", "record_status"):
+            getattr(dialog, "show_" + page)()
         self._settings_dialog = dialog
         try:
             dialog.exec()
@@ -535,6 +754,8 @@ class Controller:
             dialog.deleteLater()
 
     def ensure_online_identity(self):
+        if getattr(self, "config_read_error", None) is not None:
+            return
         if self._access_token():
             self.sync_async()
             return
@@ -583,6 +804,49 @@ class Controller:
         self.identity_generation += 1
         self.identity_in_flight = False
 
+    def restart_expired_guest(self):
+        """Replace only an explicitly expired, unlinked guest identity.
+
+        Review history, local goals, and account-scoped outbox entries remain
+        intact.  Clearing the old room/user route prevents those entries from
+        being uploaded under the newly issued guest account.
+        """
+        if getattr(self, "config_read_error", None) is not None:
+            return False
+        if self._access_token() or self.online.get("username") or self.online.get("email"):
+            return False
+        if not self.online.get("guest_id"):
+            return False
+        if self.online.get("account_kind") not in (None, "guest"):
+            return False
+
+        previous_online = self.online
+        replacement = dict(previous_online)
+        for key in (
+            "auth",
+            "guest_id",
+            "account_kind",
+            "display_name",
+            "group",
+            "members",
+            "published_deck",
+            "last_error",
+        ):
+            replacement.pop(key, None)
+        self._cancel_identity_bootstrap()
+        self.online = replacement
+        self._member_cache_key = None
+        self._last_member_fetch_at = 0
+        self.apply_room_time_zone(DEFAULT_TIME_ZONE)
+        try:
+            self.save()
+        except Exception:
+            self.online = previous_online
+            raise
+        self.refresh()
+        self.ensure_online_identity()
+        return True
+
     def _run_online_action(self, controls, task, success, error_prefix, *, on_error=None):
         generation = self.identity_generation
         for control in controls:
@@ -609,38 +873,57 @@ class Controller:
         for control in controls:
             control.setEnabled(False)
         auth = dict(self.online.get("auth") or {})
+        starting_access_token = auth.get("access_token")
         generation = self.identity_generation
 
         def refresh_auth():
-            try:
-                refreshed = self.client.refresh(auth["refresh_token"])
-            except SupabaseError as error:
-                if error.status in (400, 401):
-                    raise SupabaseError("로그인이 만료되었습니다.", status=401) from error
-                raise
-            auth.update(
-                {
-                    "access_token": refreshed["access_token"],
-                    "refresh_token": refreshed.get("refresh_token", auth["refresh_token"]),
-                    "expires_at": refreshed.get(
-                        "expires_at", int(time.time()) + refreshed.get("expires_in", 3600)
-                    ),
-                }
-            )
+            refresh_token = auth["refresh_token"]
+            cache_key = (auth.get("user_id"), refresh_token)
+            refresh_lock = getattr(self, "_auth_refresh_lock", None)
+            if refresh_lock is None:
+                refresh_lock = self._auth_refresh_lock = threading.Lock()
+            with refresh_lock:
+                cache = getattr(self, "_auth_refresh_cache", None)
+                if cache is None:
+                    cache = self._auth_refresh_cache = {}
+                refreshed_auth = cache.get(cache_key)
+                if refreshed_auth is None:
+                    try:
+                        refreshed = self.client.refresh(refresh_token)
+                    except SupabaseError as error:
+                        if error.status in (400, 401):
+                            raise SupabaseError("로그인이 만료되었습니다.", status=401) from error
+                        raise
+                    refreshed_auth = {
+                        "access_token": refreshed["access_token"],
+                        "refresh_token": refreshed.get("refresh_token", refresh_token),
+                        "expires_at": refreshed.get(
+                            "expires_at", int(time.time()) + refreshed.get("expires_in", 3600)
+                        ),
+                    }
+                    cache[cache_key] = dict(refreshed_auth)
+            auth.update(refreshed_auth)
 
         def task():
-            if not auth.get("access_token"):
-                raise SupabaseError("로그인 정보가 없습니다.", status=401)
-            if auth.get("refresh_token") and time.time() >= auth.get("expires_at", 0) - 60:
-                refresh_auth()
             try:
-                result = operation(auth["access_token"])
-            except SupabaseError as error:
-                if error.status != 401 or not auth.get("refresh_token"):
-                    raise
-                refresh_auth()
-                result = operation(auth["access_token"])
-            return auth, result
+                if getattr(self, "_auth_persistence_error", None) is not None:
+                    raise SupabaseError(
+                        "로그인 정보를 저장하지 못했습니다. 저장 문제를 해결한 뒤 다시 시도해 주세요."
+                    )
+                if not auth.get("access_token"):
+                    raise SupabaseError("로그인 정보가 없습니다.", status=401)
+                if auth.get("refresh_token") and time.time() >= auth.get("expires_at", 0) - 60:
+                    refresh_auth()
+                try:
+                    result = operation(auth["access_token"])
+                except SupabaseError as error:
+                    if error.status != 401 or not auth.get("refresh_token"):
+                        raise
+                    refresh_auth()
+                    result = operation(auth["access_token"])
+                return auth, result, None
+            except Exception as error:
+                return auth, None, error
 
         def done(future):
             if (self.closed or generation != self.identity_generation
@@ -652,10 +935,27 @@ class Controller:
                 except RuntimeError:
                     pass
             try:
-                updated_auth, result = future.result()
-                self.online["auth"] = updated_auth
-                self.online.pop("last_error", None)
-                self.save()
+                updated_auth, result, operation_error = future.result()
+                current_auth = self.online.get("auth") or {}
+                if current_auth.get("access_token") not in (
+                    starting_access_token, updated_auth.get("access_token")
+                ):
+                    return
+                if (
+                    updated_auth.get("access_token") != starting_access_token
+                    and current_auth.get("access_token") in (
+                        starting_access_token, updated_auth.get("access_token")
+                    )
+                ):
+                    self.online["auth"] = updated_auth
+                    self.online.pop("last_error", None)
+                    try:
+                        self.save()
+                    except Exception as error:
+                        self._auth_persistence_error = error
+                        raise
+                if operation_error is not None:
+                    raise operation_error
                 success(result)
             except SupabaseError as error:
                 if error.status == 401:
@@ -712,6 +1012,28 @@ class Controller:
         self.save()
         return removed
 
+    def leave_current_room_locally(self, user_id, group_id):
+        """Clear only the matching account/room after a confirmed remote leave."""
+        auth = self.online.get("auth") or {}
+        group = self.online.get("group") or {}
+        if str(auth.get("user_id") or "") != str(user_id):
+            return False
+        if str(group.get("id") or "") != str(group_id):
+            return False
+        removed = self.sync_outbox.discard_room(str(user_id), str(group_id))
+        self.review_history.invalidate_route(str(user_id), str(group_id))
+        published_deck = self.online.get("published_deck")
+        if isinstance(published_deck, dict) and published_deck.get("group_id") == str(group_id):
+            self.online.pop("published_deck", None)
+        self.online.pop("group", None)
+        self.online.pop("members", None)
+        self._member_cache_key = None
+        self._last_member_fetch_at = 0
+        self.apply_room_time_zone(DEFAULT_TIME_ZONE)
+        self.save()
+        self.refresh()
+        return True
+
     def sync_async(self, force=False):
         from datetime import timedelta
         import time as clock_module
@@ -721,7 +1043,7 @@ class Controller:
             study_day,
         )
 
-        if self.closed:
+        if self.closed or getattr(self, "config_read_error", None) is not None:
             return
         retry_clock = clock_module.monotonic()
         if (
@@ -770,9 +1092,10 @@ class Controller:
             if group else []
         )
         review_acks = []
+        stage_errors = {}
         current_deck_name = (
             self.tracker.current_deck_name
-            if self.online.get("share_deck_name", False) and self.tracker.status == "studying"
+            if self.online.get("share_deck_name", True) and self.tracker.status == "studying"
             else None
         )
         published_deck = self.online.get("published_deck")
@@ -927,6 +1250,8 @@ class Controller:
                 )
             token = auth["access_token"]
             def upload(token):
+                stage_errors.clear()
+                review_acks.clear()
                 if update_name:
                     self.client.upsert_profile(token, auth["user_id"], display_name)
                 acknowledgements = []
@@ -947,7 +1272,7 @@ class Controller:
                             raise
                         if first_error is None:
                             first_error = error
-                        if "review day archived" in str(error).casefold():
+                        if _continue_after_review_batch_error(error):
                             continue
                         break
                     except Exception as error:
@@ -989,15 +1314,19 @@ class Controller:
                         if first_error is None:
                             first_error = error
                 members = None
+                if first_error is not None:
+                    stage_errors["upload"] = first_error
                 if fetch_members:
                     try:
                         members = self.client.fetch_group_today(token, group_id, study_day_key)
                     except SupabaseError as error:
+                        stage_errors["members"] = error
                         if error.status == 401:
                             raise
                         if first_error is None:
                             first_error = error
                     except Exception as error:
+                        stage_errors["members"] = error
                         # Upload acknowledgements remain valid even when the
                         # independent member-list read fails afterwards.
                         if first_error is None:
@@ -1059,6 +1388,13 @@ class Controller:
                     sync_error,
                 ) = future.result()
                 self.online["auth"] = updated_auth
+                if sync_error is not None and _not_group_member_error(sync_error):
+                    self.online["recovery_notice"] = self.t(
+                        "방 참여가 종료됐습니다.",
+                        "Your room membership has ended.",
+                    )
+                    self.leave_current_room_locally(auth["user_id"], group_id)
+                    return
                 for batch in review_acks:
                     self.review_history.acknowledge(auth["user_id"], group_id, batch)
                 self.review_history.compact(
@@ -1106,6 +1442,36 @@ class Controller:
                     self.online["members"] = members
                     self._member_cache_key = member_cache_key
                     self._last_member_fetch_at = clock_module.time()
+                status_ledger = getattr(self, "record_status", None)
+                upload_writes_complete = (
+                    len(acknowledgements) == len(payloads)
+                    and len(review_acks) == len(review_payloads)
+                )
+                upload_complete = (
+                    upload_writes_complete
+                    and (not publish_deck or deck_published)
+                    and (sync_error is None or "members" in stage_errors)
+                    and "upload" not in stage_errors
+                )
+                if status_ledger is not None and group_id:
+                    if upload_complete:
+                        status_ledger.mark_success(
+                            "upload", user_id=auth["user_id"], group_id=group_id
+                        )
+                    elif sync_error is not None:
+                        status_ledger.set_error(
+                            "upload", sync_error,
+                            user_id=auth["user_id"], group_id=group_id,
+                        )
+                    if fetch_members and members is not None:
+                        status_ledger.mark_success(
+                            "members", user_id=auth["user_id"], group_id=group_id
+                        )
+                    elif "members" in stage_errors:
+                        status_ledger.set_error(
+                            "members", stage_errors["members"],
+                            user_id=auth["user_id"], group_id=group_id,
+                        )
                 if sync_error is not None:
                     self.online["last_error"] = str(sync_error)
                     schedule_retry()
@@ -1120,10 +1486,28 @@ class Controller:
                     self.online["last_error"] = "로그인이 만료되었습니다. 다시 로그인해 주세요."
                 else:
                     self.online["last_error"] = str(error)
+                status_ledger = getattr(self, "record_status", None)
+                if status_ledger is not None and group_id:
+                    status_ledger.set_error(
+                        "upload", error,
+                        user_id=auth["user_id"], group_id=group_id,
+                    )
                 schedule_retry()
                 self.save()
+            except OSError as error:
+                self.online["last_error"] = str(error)
+                status_ledger = getattr(self, "record_status", None)
+                if status_ledger is not None:
+                    status_ledger.set_error("local_save", error)
+                schedule_retry()
             except Exception as error:
                 self.online["last_error"] = str(error)
+                status_ledger = getattr(self, "record_status", None)
+                if status_ledger is not None and group_id:
+                    status_ledger.set_error(
+                        "upload", error,
+                        user_id=auth["user_id"], group_id=group_id,
+                    )
                 schedule_retry()
                 self.save()
             if self.sync_pending:
@@ -1140,6 +1524,12 @@ class Controller:
                 "동기화를 시작하지 못했습니다. 잠시 후 자동으로 다시 시도합니다.",
                 "Sync could not start. It will retry automatically after a delay.",
             )
+            status_ledger = getattr(self, "record_status", None)
+            if status_ledger is not None and group_id:
+                status_ledger.set_error(
+                    "upload", self.online["last_error"],
+                    user_id=auth["user_id"], group_id=group_id,
+                )
 
 
 controller = None

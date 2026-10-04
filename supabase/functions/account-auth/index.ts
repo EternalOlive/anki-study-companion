@@ -3,6 +3,13 @@ const USERNAME_RE = /^[a-z0-9_]{4,24}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RECOVERY_RE = /^[A-Za-z0-9_-]{43}$/;
 
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "authorization, x-client-info, apikey, content-type",
+  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-max-age": "86400",
+};
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")?.replace(/\/$/, "") ?? "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 
@@ -29,8 +36,15 @@ class UpstreamError extends Error {
 function json(status: number, body: Record<string, unknown>): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      ...CORS_HEADERS,
+      "content-type": "application/json; charset=utf-8",
+    },
   });
+}
+
+function preflight(): Response {
+  return new Response(null, { status: 204, headers: CORS_HEADERS });
 }
 
 function normalizeUsername(value: unknown): string {
@@ -372,9 +386,11 @@ async function recover(
 }
 
 Deno.serve(async (request: Request): Promise<Response> => {
+  if (request.method === "OPTIONS") return preflight();
+
   try {
-    if (!SUPABASE_URL || !SERVICE_KEY) throw new Error("missing server configuration");
     if (request.method !== "POST") throw new PublicError(405, "Method not allowed.");
+    if (!SUPABASE_URL || !SERVICE_KEY) throw new Error("missing server configuration");
     const declaredLength = Number(request.headers.get("content-length") || "0");
     if (Number.isFinite(declaredLength) && declaredLength > MAX_BODY_BYTES) {
       throw new PublicError(413, "Request body is too large.");

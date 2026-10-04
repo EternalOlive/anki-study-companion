@@ -60,6 +60,28 @@ class AccountAuthServerContractTests(unittest.TestCase):
         self.assertIn("total > MAX_BODY_BYTES", self.function)
         self.assertNotIn("request.text()", self.function)
 
+    def test_cors_preflight_precedes_configuration_and_request_processing(self):
+        handler = self.function.split("Deno.serve", 1)[1]
+        options = 'if (request.method === "OPTIONS") return preflight();'
+        post_only = 'if (request.method !== "POST")'
+        configuration = 'if (!SUPABASE_URL || !SERVICE_KEY)'
+        bounded_body = "await readBoundedBody(request)"
+        self.assertIn(options, handler)
+        self.assertLess(handler.index(options), handler.index(post_only))
+        self.assertLess(handler.index(options), handler.index(configuration))
+        self.assertLess(handler.index(options), handler.index(bounded_body))
+
+    def test_every_json_response_includes_the_shared_cors_contract(self):
+        self.assertIn('"access-control-allow-origin": "*"', self.function)
+        self.assertIn('"access-control-allow-methods": "POST, OPTIONS"', self.function)
+        self.assertIn(
+            '"access-control-allow-headers": "authorization, x-client-info, apikey, content-type"',
+            self.function,
+        )
+        json_helper = self.function.split("function json", 1)[1].split("function preflight", 1)[0]
+        self.assertIn("...CORS_HEADERS", json_helper)
+        self.assertEqual(self.function.count("new Response(JSON.stringify(body)"), 1)
+
     def test_nonanonymous_pending_retry_cannot_overwrite_password(self):
         pending_branch = self.function.split('account.state === "pending"', 1)[1]
         self.assertIn("if (!callerIsAnonymous)", pending_branch)

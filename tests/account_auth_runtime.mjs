@@ -18,6 +18,12 @@ await import("../supabase/functions/account-auth/index.ts");
 assert.equal(typeof captured.handler, "function", "Deno.serve handler was not registered");
 
 const USER_ID = "11111111-1111-4111-8111-111111111111";
+const EXPECTED_CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers": "authorization, x-client-info, apikey, content-type",
+  "access-control-allow-methods": "POST, OPTIONS",
+  "access-control-max-age": "86400",
+};
 const jsonResponse = (status, body) => new Response(JSON.stringify(body), {
   status,
   headers: { "content-type": "application/json" },
@@ -29,6 +35,10 @@ function request(body, headers = {}) {
     headers: { "content-type": "application/json", ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
+}
+
+function methodRequest(method, headers = {}) {
+  return new Request("https://function.test/account-auth", { method, headers });
 }
 
 async function invoke(body, { headers = {}, fetch } = {}) {
@@ -51,6 +61,43 @@ function allowedRateLimit(call) {
     return jsonResponse(200, { allowed: true, retry_after: 0 });
   }
   return null;
+}
+
+function assertCorsHeaders(response) {
+  for (const [name, value] of Object.entries(EXPECTED_CORS_HEADERS)) {
+    assert.equal(response.headers.get(name), value, `${name} should be present`);
+  }
+}
+
+async function testOptionsPreflightNeedsNoBodyAuthOrUpstreamCall() {
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return jsonResponse(500, {});
+  };
+  const response = await captured.handler(methodRequest("OPTIONS", {
+    origin: "https://client.test",
+    "access-control-request-method": "POST",
+    "access-control-request-headers": "authorization, content-type",
+  }));
+  assert.equal(response.status, 204);
+  assert.equal(await response.text(), "");
+  assertCorsHeaders(response);
+  assert.equal(fetchCount, 0);
+}
+
+async function testGetIsRejectedWithCorsHeaders() {
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return jsonResponse(500, {});
+  };
+  const response = await captured.handler(methodRequest("GET"));
+  const body = await response.json();
+  assert.equal(response.status, 405);
+  assert.match(body.error, /Method not allowed/i);
+  assertCorsHeaders(response);
+  assert.equal(fetchCount, 0);
 }
 
 async function testUnauthenticatedBindRejected() {
@@ -143,8 +190,10 @@ async function testMalformedAndOversizedBodies() {
   const fetch = async () => { fetchCount += 1; return jsonResponse(500, {}); };
   const malformed = await invoke("{not json", { fetch });
   assert.equal(malformed.response.status, 400);
+  assertCorsHeaders(malformed.response);
   const oversized = await invoke("x".repeat(4097), { fetch });
   assert.equal(oversized.response.status, 413);
+  assertCorsHeaders(oversized.response);
   assert.equal(fetchCount, 0);
 }
 
@@ -192,6 +241,7 @@ async function testCorrectBindPreservesAuthenticatedUserId() {
     },
   );
   assert.equal(result.response.status, 200);
+  assertCorsHeaders(result.response);
   assert.equal(result.body.user.id, USER_ID);
   assert.equal(result.body.username, "reader_7");
   assert.equal(typeof result.body.recovery_code, "string");
@@ -199,6 +249,8 @@ async function testCorrectBindPreservesAuthenticatedUserId() {
 }
 
 const tests = [
+  testOptionsPreflightNeedsNoBodyAuthOrUpstreamCall,
+  testGetIsRejectedWithCorsHeaders,
   testUnauthenticatedBindRejected,
   testActiveBindWrongPasswordNeverUpdatesAuthUser,
   testPendingNonAnonymousWrongPasswordNeverResetsAuthUser,

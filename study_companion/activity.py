@@ -18,6 +18,11 @@ VALID_REVIEW_TYPES = {0, 1, 2, 3}
 MAX_REVIEW_TIME_MS = 3_600_000
 
 
+def normalize_review_time_ms(value: Any) -> int:
+    """Clamp one Anki review duration to the shared accepted range."""
+    return min(MAX_REVIEW_TIME_MS, max(0, int(value)))
+
+
 def weekly_activity(
     rows: list[tuple[Any, Any, Any, Any, Any]],
     current: datetime,
@@ -50,7 +55,7 @@ def weekly_activity(
                 continue
             review_id = int(review_id)
             card_id = int(card_id)
-            time_ms = min(MAX_REVIEW_TIME_MS, max(0, int(raw_time)))
+            time_ms = normalize_review_time_ms(raw_time)
             ease = int(raw_ease)
             review_type = int(raw_type)
         except (TypeError, ValueError, OverflowError):

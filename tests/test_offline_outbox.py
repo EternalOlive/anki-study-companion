@@ -38,7 +38,8 @@ class OfflineOutboxTests(unittest.TestCase):
         self.assertEqual(pending[0]["active_seconds"], 120)
 
     def test_new_cumulative_snapshot_replaces_older_retry(self):
-        outbox = SyncOutbox({})
+        times = iter((100, 200, 300))
+        outbox = SyncOutbox({}, clock=lambda: next(times))
         outbox.enqueue(snapshot(revision=2, active_seconds=60))
         outbox.enqueue(snapshot(revision=3, active_seconds=90))
         outbox.enqueue(snapshot(revision=2, active_seconds=30))
@@ -49,6 +50,19 @@ class OfflineOutboxTests(unittest.TestCase):
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["revision"], 3)
         self.assertEqual(pending[0]["active_seconds"], 90)
+        self.assertEqual(pending[0]["_queued_at"], 100)
+
+    def test_pending_summary_reports_oldest_age_for_only_the_current_route(self):
+        outbox = SyncOutbox({}, clock=lambda: 100)
+        outbox.enqueue(snapshot())
+        outbox.enqueue(snapshot(group_id="room-b", revision=2))
+
+        summary = outbox.pending_summary(
+            user_id="user-a", group_id="room-a", device_id="device-a", now=175
+        )
+        self.assertEqual(summary["count"], 1)
+        self.assertEqual(summary["oldest_queued_at"], 100)
+        self.assertEqual(summary["oldest_age_seconds"], 75)
 
     def test_acknowledgement_only_removes_the_exact_revision(self):
         outbox = SyncOutbox({})

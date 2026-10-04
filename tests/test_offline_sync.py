@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from study_companion.online import DeviceSyncLedger, SupabaseError, DeviceSnapshotConflict
 from study_companion.outbox import SyncOutbox
 from study_companion.reviews import ReviewHistory
+from study_companion.record_status import RecordStatusLedger
 
 
 class FakeClient:
@@ -19,6 +20,7 @@ class FakeClient:
         self.review_calls = []
         self.fail_days = set()
         self.review_fail_days = set()
+        self.review_failures = {}
         self.member_error = None
 
     def upsert_profile(self, token, user_id, display_name):
@@ -42,6 +44,8 @@ class FakeClient:
 
     def sync_review_day(self, token, *, group_id, batch):
         self.review_calls.append((token, group_id, batch["target_day"]))
+        if batch["target_day"] in self.review_failures:
+            raise self.review_failures[batch["target_day"]]
         if batch["target_day"] in self.review_fail_days:
             raise SupabaseError("review day archived", status=400)
         return None
@@ -73,6 +77,13 @@ class OfflineSyncTests(unittest.TestCase):
                 )
             ),
             "QTimer": SimpleNamespace(singleShot=lambda delay, callback: callback()),
+            "_not_group_member_error": lambda error: (
+                str(error).strip().casefold() == "not a member of this group"
+            ),
+            "_continue_after_review_batch_error": lambda error: (
+                "review day archived" in str(error).casefold()
+                or getattr(error, "status", None) in (400, 409, 422)
+            ),
         }
         exec(compile(ast.Module(body=[controller], type_ignores=[]), str(path), "exec"), scope)
         cls.Controller = scope["Controller"]
@@ -121,7 +132,24 @@ class OfflineSyncTests(unittest.TestCase):
         controller.save = Mock()
         controller.t = lambda ko, en: ko
         controller._last_member_fetch_at = 0
+        controller.record_status = RecordStatusLedger({})
+        controller.leave_current_room_locally = Mock(return_value=True)
         self.controller = controller
+
+    def test_upload_and_member_failures_are_reported_independently(self):
+        self.controller.client.fail_days.add("2026-10-04")
+        self.controller.client.member_error = SupabaseError("read offline", status=503)
+        self.controller.sync_async(force=True)
+        self.finish_background()
+        status = self.controller.record_status.snapshot(user_id="user-a", group_id="room-a")
+        self.assertEqual(set(status["errors"]), {"upload", "members"})
+        self.assertEqual(status["primary_issue"], "upload")
+        self.controller.client.fail_days.clear()
+        self.controller.sync_async(force=True)
+        self.finish_background()
+        status = self.controller.record_status.snapshot(user_id="user-a", group_id="room-a")
+        self.assertEqual(set(status["errors"]), {"members"})
+        self.assertIsNotNone(status["upload_at"])
 
     def finish_background(self):
         task, done = self.scheduled.pop()
@@ -145,16 +173,7 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertEqual(by_day["2026-10-03"]["status"], "stopped")
         self.controller.save.assert_called_once()
 
-    def test_deck_name_sharing_is_opt_in_and_off_clears_server_value(self):
-        self.controller.sync_async()
-        task, _done = self.take_background()
-        task()
-        self.assertEqual(
-            self.controller.client.deck_calls[-1], ("room-a", "device-a", None)
-        )
-
-        self.controller.sync_in_flight = False
-        self.controller.online["share_deck_name"] = True
+    def test_deck_name_sharing_defaults_on_and_off_clears_server_value(self):
         self.controller.sync_async()
         task, _done = self.take_background()
         task()
@@ -163,7 +182,18 @@ class OfflineSyncTests(unittest.TestCase):
             ("room-a", "device-a", "English"),
         )
 
+        self.controller.sync_in_flight = False
+        self.controller.online["share_deck_name"] = False
+        self.controller.sync_async()
+        task, _done = self.take_background()
+        task()
+        self.assertEqual(
+            self.controller.client.deck_calls[-1],
+            ("room-a", "device-a", None),
+        )
+
     def test_unchanged_deck_and_recent_members_skip_redundant_requests(self):
+        self.controller.online["share_deck_name"] = False
         self.controller.online["published_deck"] = {
             "user_id": "user-a",
             "group_id": "room-a",
@@ -210,6 +240,7 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertTrue(deck_published)
 
     def test_cleared_deck_does_not_need_a_ttl_heartbeat(self):
+        self.controller.online["share_deck_name"] = False
         self.controller.online["published_deck"] = {
             "user_id": "user-a",
             "group_id": "room-a",
@@ -299,6 +330,7 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertEqual(len(self.controller.client.member_calls), 1)
 
     def test_account_change_invalidates_member_and_deck_cache(self):
+        self.controller.online["share_deck_name"] = False
         self.controller.online["auth"] = {
             "user_id": "user-b", "access_token": "token-b"
         }
@@ -393,6 +425,59 @@ class OfflineSyncTests(unittest.TestCase):
             ],
             ["2026-01-01"],
         )
+
+    def test_deterministic_bad_day_does_not_block_another_day(self):
+        self.controller.review_history.observe(
+            "collection", "2026-10-03", [(1, 10, 1000, 3, 1)]
+        )
+        self.controller.review_history.observe(
+            "collection", "2026-10-04", [(2, 20, 2000, 3, 1)]
+        )
+        self.controller.client.review_failures["2026-10-04"] = SupabaseError(
+            "invalid review event", status=400
+        )
+
+        self.controller.sync_async(force=True)
+        self.finish_background()
+
+        self.assertEqual(
+            [day for _token, _room, day in self.controller.client.review_calls],
+            ["2026-10-04", "2026-10-03"],
+        )
+        self.assertEqual(
+            [batch["target_day"] for batch in self.controller.review_history.pending(
+                "user-a", "room-a"
+            )],
+            ["2026-10-04"],
+        )
+
+    def test_transient_bad_day_stops_later_review_batches(self):
+        for status in (429, 503):
+            with self.subTest(status=status):
+                self.setUp()
+                self.controller.review_history.observe(
+                    "collection", "2026-10-03", [(1, 10, 1000, 3, 1)]
+                )
+                self.controller.review_history.observe(
+                    "collection", "2026-10-04", [(2, 20, 2000, 3, 1)]
+                )
+                self.controller.client.review_failures["2026-10-04"] = SupabaseError(
+                    "temporary failure", status=status
+                )
+
+                self.controller.sync_async(force=True)
+                self.finish_background()
+
+                self.assertEqual(
+                    [day for _token, _room, day in self.controller.client.review_calls],
+                    ["2026-10-04"],
+                )
+                self.assertEqual(
+                    [batch["target_day"] for batch in self.controller.review_history.pending(
+                        "user-a", "room-a"
+                    )],
+                    ["2026-10-03", "2026-10-04"],
+                )
 
     def test_partial_failure_acks_success_and_keeps_only_failed_day(self):
         self.controller.client.fail_days.add("2026-10-03")

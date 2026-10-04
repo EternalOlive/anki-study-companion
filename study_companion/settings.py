@@ -17,16 +17,20 @@ from aqt.qt import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDateTime,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QStackedWidget,
+    QTabWidget,
     QTimeZone,
     QTimer,
+    QToolButton,
     Qt,
     QVBoxLayout,
     QWidget,
@@ -35,6 +39,13 @@ from aqt.qt import (
 from .nicknames import canonical_nickname
 from .online import SupabaseError
 from .study_day import DAY_START_HOUR, DEFAULT_TIME_ZONE, room_time_zone
+from .ux_services import (
+    ANSWER_GOAL_MAX,
+    TIME_GOAL_MAX_MINUTES,
+    normalize_room_name,
+    validate_goal,
+    validate_invite_code,
+)
 
 
 def _time_zone_text(value):
@@ -66,6 +77,11 @@ def _apply_group_time_zone(controller, group):
         apply(room_time_zone(group))
 
 
+def _already_left_error(error):
+    """Recognize only the server's explicit idempotent leave condition."""
+    return str(error).strip().casefold() == "not a member of this group"
+
+
 def _clear_layout(layout):
     while layout.count():
         item = layout.takeAt(0)
@@ -84,12 +100,13 @@ class SettingsDialog(QDialog):
     PAGE_HOME = 0
     PAGE_CREATE = 1
     PAGE_JOIN = 2
-    PAGE_ACCOUNT = 3
-    PAGE_EMAIL = 4
-    PAGE_LOGIN = 5
-    PAGE_LEAVE = 6
-    PAGE_RECOVER = 7
-    PAGE_MEMBERS = 8
+    PAGE_EMAIL = 3
+    PAGE_LOGIN = 4
+    PAGE_LEAVE = 5
+    PAGE_RECOVER = 6
+    TAB_ROOM = 0
+    TAB_SETTINGS = 1
+    TAB_ACCOUNT = 2
 
     def __init__(self, controller, parent=None):
         super().__init__(parent or mw)
@@ -98,15 +115,17 @@ class SettingsDialog(QDialog):
         self._time_at_open = controller.tracker.time_goal_minutes
         self._answers_at_open = controller.tracker.card_goal
         self._share_deck_at_open = bool(
-            controller.online.get("share_deck_name", False)
+            controller.online.get("share_deck_name", True)
         )
         self._busy = False
         self._alive = True
         self._controller_signature = None
+        self._copy_feedback_generation = {}
+        self._members_loaded_context = None
 
         self.setWindowTitle(self._t("스터디 관리", "Study settings"))
-        self.setMinimumWidth(440)
-        self.resize(470, self.sizeHint().height())
+        self.setMinimumSize(440, 420)
+        self.resize(470, 560)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 20)
@@ -117,22 +136,18 @@ class SettingsDialog(QDialog):
         self.home_page = self._build_home_page()
         self.create_page = self._build_create_page()
         self.join_page = self._build_join_page()
-        self.account_page = self._build_account_page()
         self.email_page = self._build_email_page()
         self.login_page = self._build_login_page()
         self.leave_page = self._build_leave_page()
         self.recover_page = self._build_recover_page()
-        self.members_page = self._build_members_page()
         for page in (
             self.home_page,
             self.create_page,
             self.join_page,
-            self.account_page,
             self.email_page,
             self.login_page,
             self.leave_page,
             self.recover_page,
-            self.members_page,
         ):
             self.pages.addWidget(page)
 
@@ -178,23 +193,130 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._heading(title))
         return widget, layout
 
+    def _scrolling_tab(self, parent):
+        scroll = QScrollArea(parent)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget(scroll)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(4, 14, 8, 8)
+        layout.setSpacing(20)
+        scroll.setWidget(content)
+        return scroll, content, layout
+
     def _build_home_page(self):
         page = QWidget(self)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(20)
+        layout.setSpacing(12)
+
+        self.home_tabs = QTabWidget(page)
+        self.home_tabs.setObjectName("settingsTabs")
+        self.home_tabs.setDocumentMode(True)
+        self.home_tabs.setUsesScrollButtons(False)
+        self.room_tab, self.room_tab_content, room_tab_layout = (
+            self._scrolling_tab(self.home_tabs)
+        )
+        self.settings_tab, self.settings_tab_content, settings_tab_layout = (
+            self._scrolling_tab(self.home_tabs)
+        )
+        self.account_tab, self.account_tab_content, account_tab_layout = (
+            self._scrolling_tab(self.home_tabs)
+        )
+        self.home_tabs.addTab(self.room_tab, self._t("방", "Room"))
+        self.home_tabs.addTab(self.settings_tab, self._t("내 설정", "My settings"))
+        self.home_tabs.addTab(self.account_tab, self._t("계정", "Account"))
+        layout.addWidget(self.home_tabs, 1)
 
         room, room_section_layout = self._section(
-            page, self._t("스터디방", "Study room")
+            self.room_tab_content, self._t("스터디방", "Study room")
         )
         self.room_layout = QVBoxLayout()
         self.room_layout.setContentsMargins(0, 0, 0, 0)
         self.room_layout.setSpacing(8)
         room_section_layout.addLayout(self.room_layout)
-        layout.addWidget(room)
+        room_tab_layout.addWidget(room)
+
+        self.members_section, members_section_layout = self._section(
+            self.room_tab_content, self._t("멤버", "Members")
+        )
+        self.members_list_layout = QVBoxLayout()
+        self.members_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.members_list_layout.setSpacing(8)
+        members_section_layout.addLayout(self.members_list_layout)
+        self.members_error = self._error_label()
+        members_section_layout.addWidget(self.members_error)
+        self.members_refresh = QPushButton(
+            self._t("새로고침", "Refresh"), self.members_section
+        )
+        self.members_refresh.clicked.connect(self.load_members)
+        members_refresh_row = QHBoxLayout()
+        members_refresh_row.addStretch(1)
+        members_refresh_row.addWidget(self.members_refresh)
+        members_section_layout.addLayout(members_refresh_row)
+        room_tab_layout.addWidget(self.members_section)
+        room_tab_layout.addStretch(1)
+
+        self.record_status_toggle = QToolButton(self.settings_tab_content)
+        self.record_status_toggle.setObjectName("recordStatusToggle")
+        self.record_status_toggle.setText(self._t("기록 반영", "Record status"))
+        self.record_status_toggle.setCheckable(True)
+        self.record_status_toggle.setAutoRaise(True)
+        self.record_status_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.record_status_toggle.setToolButtonStyle(
+            Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+        )
+        self.record_status_toggle.setAccessibleName(
+            self._t("기록 반영 상세", "Record status details")
+        )
+        self.record_status_toggle.toggled.connect(self._toggle_record_status)
+        settings_tab_layout.addWidget(self.record_status_toggle)
+
+        self.record_status_details = QWidget(self.settings_tab_content)
+        self.record_status_details.setObjectName("recordStatusDetails")
+        status_layout = QVBoxLayout(self.record_status_details)
+        status_layout.setContentsMargins(18, 0, 0, 0)
+        status_layout.setSpacing(6)
+        status_form = QFormLayout()
+        status_form.setContentsMargins(0, 0, 0, 0)
+        status_form.setHorizontalSpacing(16)
+        status_form.setVerticalSpacing(5)
+        self.record_status_rows = {}
+        for key, korean, english in (
+            ("local_read_at", "이 PC 기록 확인", "Records read on this PC"),
+            ("local_save_at", "이 PC 기록 저장", "Records saved on this PC"),
+            ("upload_at", "방에 공유", "Shared with room"),
+            ("members_at", "친구 기록 조회", "Friend records refreshed"),
+        ):
+            title = QLabel(self._t(korean, english), self.record_status_details)
+            value = QLabel("—", self.record_status_details)
+            value.setAlignment(Qt.AlignmentFlag.AlignRight)
+            status_form.addRow(title, value)
+            self.record_status_rows[key] = (title, value)
+        status_layout.addLayout(status_form)
+        self.record_status_errors = QLabel("", self.record_status_details)
+        self.record_status_errors.setObjectName("recordStatusErrors")
+        self.record_status_errors.setWordWrap(True)
+        self.record_status_errors.setVisible(False)
+        status_layout.addWidget(self.record_status_errors)
+        self.record_status_zone = QLabel("", self.record_status_details)
+        self.record_status_zone.setWordWrap(True)
+        status_layout.addWidget(self.record_status_zone)
+        self.record_status_mobile = self._note(
+            self._t(
+                "모바일 기록은 모바일과 PC에서 Anki 동기화 후 반영됩니다.",
+                "Mobile records appear after syncing Anki on mobile and this PC.",
+            )
+        )
+        status_layout.addWidget(self.record_status_mobile)
+        self.record_status_details.setVisible(False)
+        settings_tab_layout.addWidget(self.record_status_details)
 
         sharing, sharing_layout = self._section(
-            page, self._t("방에 공유하는 정보", "Information shared with the room")
+            self.settings_tab_content,
+            self._t("방에 공유하는 정보", "Information shared with the room"),
         )
         sharing_layout.addWidget(
             self._note(
@@ -214,27 +336,27 @@ class SettingsDialog(QDialog):
         sharing_layout.addWidget(
             self._note(
                 self._t(
-                    "덱 이름은 선택한 경우에만 같은 방 멤버에게 표시됩니다. 카드 내용은 공유하지 않습니다.",
-                    "The deck name is shown only to room members when enabled. Card contents are not shared.",
+                    "기본적으로 같은 방 멤버에게 표시됩니다. 끄면 숨겨지며 카드 내용은 공유하지 않습니다.",
+                    "Shown to room members by default. Turn it off to hide it. Card contents are not shared.",
                 )
             )
         )
-        layout.addWidget(sharing)
+        settings_tab_layout.addWidget(sharing)
 
         goals, goals_layout = self._section(
-            page, self._t("일일 목표", "Daily goals")
+            self.settings_tab_content, self._t("일일 목표", "Daily goals")
         )
         goals_form = QFormLayout()
         goals_form.setHorizontalSpacing(16)
         goals_form.setVerticalSpacing(8)
         self.time_goal = QSpinBox(goals)
         self.time_goal.setObjectName("timeGoal")
-        self.time_goal.setRange(0, 1440)
+        self.time_goal.setRange(0, TIME_GOAL_MAX_MINUTES)
         self.time_goal.setSpecialValueText(self._t("설정 안 함", "Not set"))
         self.time_goal.setSuffix(self._t(" 분", " min"))
         self.answer_goal = QSpinBox(goals)
         self.answer_goal.setObjectName("answerGoal")
-        self.answer_goal.setRange(0, 10000)
+        self.answer_goal.setRange(0, ANSWER_GOAL_MAX)
         self.answer_goal.setSpecialValueText(self._t("설정 안 함", "Not set"))
         self.answer_goal.setSuffix(self._t(" 회", " answers"))
         goals_form.addRow(self._t("공부 시간", "Study time"), self.time_goal)
@@ -248,10 +370,10 @@ class SettingsDialog(QDialog):
                 )
             )
         )
-        layout.addWidget(goals)
+        settings_tab_layout.addWidget(goals)
 
         environment, environment_layout = self._section(
-            page, self._t("환경", "Preferences")
+            self.settings_tab_content, self._t("환경", "Preferences")
         )
         language_form = QFormLayout()
         self.language = QComboBox(environment)
@@ -260,24 +382,46 @@ class SettingsDialog(QDialog):
         self.language.addItem("English", "en")
         language_form.addRow(self._t("언어", "Language"), self.language)
         environment_layout.addLayout(language_form)
-        layout.addWidget(environment)
+        settings_tab_layout.addWidget(environment)
+        settings_tab_layout.addStretch(1)
 
+        self.account_summary = self._note("")
+        self.account_summary.setTextFormat(Qt.TextFormat.PlainText)
+        account_tab_layout.addWidget(self.account_summary)
         account_row = QHBoxLayout()
-        self.display_code_label = QLabel("—", page)
+        self.display_code_label = QLabel("—", self.account_tab_content)
         self.display_code_label.setObjectName("displayCode")
-        self.account_button = QPushButton(
-            self._t("계정 관리", "Account"), page
+        self.account_code = self.display_code_label
+        account_row.addWidget(
+            QLabel(self._t("내 코드", "My code"), self.account_tab_content)
         )
-        self.account_button.clicked.connect(self.show_account)
-        account_row.addWidget(QLabel(self._t("내 코드", "My code"), page))
         account_row.addWidget(self.display_code_label)
         account_row.addStretch(1)
-        account_row.addWidget(self.account_button)
-        layout.addLayout(account_row)
+        account_tab_layout.addLayout(account_row)
+        self.account_error = self._error_label()
+        account_tab_layout.addWidget(self.account_error)
+        self.link_email_button = QPushButton(
+            self._t("통합 계정 만들기", "Create synced account"),
+            self.account_tab_content,
+        )
+        self.login_button = QPushButton(
+            self._t("다른 PC의 계정으로 로그인", "Sign in on this PC"),
+            self.account_tab_content,
+        )
+        self.restart_guest_button = QPushButton(
+            self._t("새 익명 계정 시작", "Start a new guest account"),
+            self.account_tab_content,
+        )
+        self.link_email_button.clicked.connect(self.show_email)
+        self.login_button.clicked.connect(self.show_login)
+        self.restart_guest_button.clicked.connect(self.restart_expired_guest)
+        account_tab_layout.addWidget(self.link_email_button)
+        account_tab_layout.addWidget(self.login_button)
+        account_tab_layout.addWidget(self.restart_guest_button)
+        account_tab_layout.addStretch(1)
 
         self.home_error = self._error_label()
         layout.addWidget(self.home_error)
-        layout.addStretch(1)
 
         self.home_buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
@@ -294,12 +438,21 @@ class SettingsDialog(QDialog):
         self.cancel_button.setText(self._t("취소", "Cancel"))
         self.home_buttons.accepted.connect(self.save_settings)
         self.home_buttons.rejected.connect(self.reject)
-        layout.addWidget(self.home_buttons)
+        self.close_button = QPushButton(self._t("닫기", "Close"), page)
+        self.close_button.clicked.connect(self.reject)
+        footer = QHBoxLayout()
+        footer.addStretch(1)
+        footer.addWidget(self.close_button)
+        footer.addWidget(self.home_buttons)
+        layout.addLayout(footer)
 
         self.time_goal.valueChanged.connect(self._update_save_enabled)
         self.answer_goal.valueChanged.connect(self._update_save_enabled)
         self.language.currentIndexChanged.connect(self._update_save_enabled)
         self.share_deck_name.toggled.connect(self._update_save_enabled)
+        self.home_tabs.currentChanged.connect(self._home_tab_changed)
+        self.home_buttons.setVisible(False)
+        self.close_button.setVisible(True)
         return page
 
     def _detail_page(self, title):
@@ -417,7 +570,7 @@ class SettingsDialog(QDialog):
         return page
 
     def _build_members_page(self):
-        page, layout = self._detail_page(self._t("멤버 관리", "Manage members"))
+        page, layout = self._detail_page(self._t("멤버 목록", "Members"))
         self.members_notice = self._note(
             self._t(
                 "내보낸 계정은 차단을 해제하기 전까지 이 방에 다시 참여할 수 없습니다.",
@@ -444,36 +597,9 @@ class SettingsDialog(QDialog):
         return page
 
     def _build_account_page(self):
-        page, layout = self._detail_page(self._t("계정 관리", "Account"))
-        self.account_summary = self._note("")
-        self.account_summary.setTextFormat(Qt.TextFormat.PlainText)
-        self.account_code = QLabel("—", page)
-        layout.addWidget(self.account_summary)
-        code_row = QHBoxLayout()
-        code_row.addWidget(QLabel(self._t("내 코드", "My code"), page))
-        code_row.addWidget(self.account_code)
-        code_row.addStretch(1)
-        layout.addLayout(code_row)
-        self.account_error = self._error_label()
-        layout.addWidget(self.account_error)
-        self.link_email_button = QPushButton(
-            self._t("통합 계정 만들기", "Create synced account"), page
-        )
-        self.login_button = QPushButton(
-            self._t("다른 PC의 계정으로 로그인", "Sign in on this PC"), page
-        )
-        self.link_email_button.clicked.connect(self.show_email)
-        self.login_button.clicked.connect(self.show_login)
-        layout.addWidget(self.link_email_button)
-        layout.addWidget(self.login_button)
-        layout.addStretch(1)
-        back = QPushButton(self._t("뒤로", "Back"), page)
-        back.clicked.connect(self.show_home)
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        bottom.addWidget(back)
-        layout.addLayout(bottom)
-        return page
+        # Kept as a stack slot for compatibility with older saved navigation
+        # indices. The account overview now lives in the fixed Account tab.
+        return QWidget(self)
 
     def _build_email_page(self):
         page, layout = self._detail_page(
@@ -611,6 +737,7 @@ class SettingsDialog(QDialog):
         signature = self._current_controller_signature()
         self.display_code_label.setText(self._display_code())
         self.account_code.setText(self._display_code())
+        self._refresh_record_status()
         if signature != self._controller_signature:
             self._refresh_room_section()
             self._refresh_account_page()
@@ -640,6 +767,7 @@ class SettingsDialog(QDialog):
             self.refresh_timer.stop()
             return
         signature = self._current_controller_signature()
+        self._refresh_record_status()
         if signature == self._controller_signature:
             return
         # Refresh only server-backed portions. Goal and language drafts remain intact.
@@ -651,6 +779,9 @@ class SettingsDialog(QDialog):
 
     def _refresh_room_section(self):
         _clear_layout(self.room_layout)
+        _clear_layout(self.members_list_layout)
+        self.members_section.setVisible(False)
+        self._members_loaded_context = None
         self.rotate_invite_button = None
         group = self.controller.online.get("group")
         if group:
@@ -672,43 +803,47 @@ class SettingsDialog(QDialog):
             day = QLabel(day_label, self)
             day.setToolTip(name.toolTip())
             self.room_layout.addWidget(day)
-            row = QHBoxLayout()
+            code_row = QHBoxLayout()
             code = str(group.get("invite_code") or "—")
             self.room_invite_code = QLabel(code, self)
-            self.copy_invite_button = QPushButton(self._t("복사", "Copy"), self)
-            self.copy_feedback = QLabel("", self)
+            self.copy_invite_button = QPushButton(
+                self._t("코드 복사", "Copy code"), self
+            )
+            self.copy_invite_button.setObjectName("copyInviteCode")
+            self.copy_invite_message_button = QPushButton(
+                self._t("초대 복사", "Copy invite"), self
+            )
+            self.copy_invite_message_button.setObjectName("copyInviteMessage")
             self.copy_invite_button.setEnabled(code != "—")
+            self.copy_invite_message_button.setEnabled(code != "—")
             self.copy_invite_button.clicked.connect(self.copy_invite_code)
-            row.addWidget(QLabel(self._t("초대 코드", "Invite code"), self))
-            row.addWidget(self.room_invite_code)
-            row.addWidget(self.copy_invite_button)
-            row.addWidget(self.copy_feedback)
-            row.addStretch(1)
-            self.room_layout.addLayout(row)
+            self.copy_invite_message_button.clicked.connect(self.copy_invite_message)
+            code_row.addWidget(QLabel(self._t("초대 코드", "Invite code"), self))
+            code_row.addWidget(self.room_invite_code)
+            code_row.addStretch(1)
+            self.room_layout.addLayout(code_row)
+            copy_row = QHBoxLayout()
+            copy_row.addWidget(self.copy_invite_button)
+            copy_row.addWidget(self.copy_invite_message_button)
+            copy_row.addStretch(1)
+            self.room_layout.addLayout(copy_row)
             user_id = (self.controller.online.get("auth") or {}).get("user_id")
             if user_id and group.get("owner_id") == user_id:
-                manage_row = QHBoxLayout()
-                manage_row.addStretch(1)
-                self.manage_members_button = QPushButton(
-                    self._t("멤버 관리", "Manage members"), self
-                )
-                self.manage_members_button.clicked.connect(self.show_members)
-                manage_row.addWidget(self.manage_members_button)
-                self.room_layout.addLayout(manage_row)
-                rotate_row = QHBoxLayout()
-                rotate_row.addStretch(1)
+                owner_actions = QHBoxLayout()
                 self.rotate_invite_button = QPushButton(
-                    self._t("새 초대 코드 만들기", "Generate new invite code"), self
+                    self._t("초대 코드 변경", "Change invite code"), self
                 )
                 self.rotate_invite_button.clicked.connect(self.rotate_invite_code)
-                rotate_row.addWidget(self.rotate_invite_button)
-                self.room_layout.addLayout(rotate_row)
+                owner_actions.addWidget(self.rotate_invite_button)
+                owner_actions.addStretch(1)
+                self.room_layout.addLayout(owner_actions)
             leave_row = QHBoxLayout()
             leave_row.addStretch(1)
             leave = QPushButton(self._t("방 나가기", "Leave room"), self)
             leave.clicked.connect(self.show_leave)
             leave_row.addWidget(leave)
             self.room_layout.addLayout(leave_row)
+            self.members_section.setVisible(True)
             return
 
         if not self.controller._access_token():
@@ -779,20 +914,165 @@ class SettingsDialog(QDialog):
             )
             self.link_email_button.setVisible(False)
             self.login_button.setVisible(True)
+        expired_guest = bool(
+            not token
+            and self.controller.online.get("guest_id")
+            and not username
+            and not email
+            and kind in (None, "guest")
+        )
+        self.restart_guest_button.setVisible(expired_guest)
+
+    def restart_expired_guest(self):
+        answer = QMessageBox.question(
+            self,
+            self._t("새 익명 계정", "New guest account"),
+            self._t(
+                "새 고유번호를 발급합니다. 이전 방은 복구되지 않지만 Anki 복습 기록과 목표는 그대로 남습니다.",
+                "Create a new identity. The previous room cannot be restored, but Anki review history and goals are kept.",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            restarted = self.controller.restart_expired_guest()
+        except Exception as error:
+            self._set_message(
+                self.account_error,
+                self._t(
+                    f"새 계정을 시작하지 못했습니다.\n{error}",
+                    f"Could not start a new account.\n{error}",
+                ),
+            )
+            return
+        if restarted:
+            self.show_home()
 
     def show_home(self):
         self.refresh_from_controller()
-        self.pages.setCurrentIndex(self.PAGE_HOME)
+        self._show_page(self.PAGE_HOME)
+        self._home_tab_changed(self.home_tabs.currentIndex())
         self._update_save_enabled()
+
+    def _show_page(self, index):
+        self.pages.setCurrentIndex(index)
+        QTimer.singleShot(0, self._scroll_to_top)
+
+    def _scroll_to_top(self):
+        if not self._valid() or self.pages.currentIndex() != self.PAGE_HOME:
+            return
+        current = self.home_tabs.currentWidget()
+        if isinstance(current, QScrollArea):
+            current.verticalScrollBar().setValue(0)
+
+    def _home_tab_changed(self, index):
+        settings_selected = index == self.TAB_SETTINGS
+        self.home_buttons.setVisible(settings_selected)
+        self.close_button.setVisible(not settings_selected)
+        if index == self.TAB_ROOM and self.controller.online.get("group"):
+            QTimer.singleShot(0, self._load_members_if_needed)
+
+    def _load_members_if_needed(self):
+        group = self.controller.online.get("group") or {}
+        auth = self.controller.online.get("auth") or {}
+        context = (
+            str(group.get("id") or ""),
+            str(auth.get("user_id") or ""),
+            str(group.get("owner_id") or ""),
+        )
+        if not context[0] or not context[1] or context == self._members_loaded_context:
+            return
+        self.load_members()
+
+    def show_record_status(self):
+        self.show_home()
+        self.home_tabs.setCurrentIndex(self.TAB_SETTINGS)
+        self.record_status_toggle.setChecked(True)
+        self.record_status_toggle.setFocus()
+
+    def _toggle_record_status(self, expanded):
+        self.record_status_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
+        self.record_status_details.setVisible(bool(expanded))
+
+    @staticmethod
+    def _status_time_text(value, time_zone):
+        if value is None:
+            return "—"
+        zone = QTimeZone(str(time_zone or "UTC").encode("utf-8"))
+        if not zone.isValid():
+            zone = QTimeZone(b"UTC")
+        moment = QDateTime.fromSecsSinceEpoch(int(float(value)), zone)
+        current = QDateTime.currentDateTimeUtc().toTimeZone(zone)
+        pattern = "HH:mm" if moment.date() == current.date() else "MM-dd HH:mm"
+        return moment.toString(pattern)
+
+    def _refresh_record_status(self):
+        snapshot_method = getattr(self.controller, "record_status_snapshot", None)
+        if not callable(snapshot_method):
+            return
+        snapshot = snapshot_method() or {}
+        group = self.controller.online.get("group") or {}
+        has_room = bool(group.get("id"))
+        time_zone = str(
+            group.get("time_zone")
+            or _time_zone_text(QTimeZone.systemTimeZoneId())
+            or DEFAULT_TIME_ZONE
+        )
+        tooltip = self._t(
+            f"방 시간대: {time_zone}", f"Room time zone: {time_zone}"
+        )
+        for key, (title, value) in self.record_status_rows.items():
+            remote = key in ("upload_at", "members_at")
+            title.setVisible(has_room or not remote)
+            value.setVisible(has_room or not remote)
+            if remote and not has_room:
+                continue
+            stamp = snapshot.get(key)
+            text = self._status_time_text(stamp, time_zone)
+            if key == "upload_at" and int(snapshot.get("pending_count") or 0) > 0:
+                text = self._t("대기", "Pending")
+                success_text = self._status_time_text(stamp, time_zone)
+                value.setToolTip(self._t(
+                    f"마지막 공유 {success_text} · {tooltip}",
+                    f"Last shared {success_text} · {tooltip}",
+                ))
+            else:
+                value.setToolTip(tooltip)
+            value.setText(text)
+        error_names = {
+            "local_save": self._t("기록 저장 실패", "Could not save records"),
+            "local_read": self._t("기록 확인 실패", "Could not read records"),
+            "upload": self._t("공유 지연", "Upload delayed"),
+            "members": self._t("조회 지연", "Refresh delayed"),
+        }
+        errors = snapshot.get("errors") or {}
+        visible_errors = [
+            error_names[key] for key in ("local_save", "local_read", "upload", "members")
+            if key in errors
+        ]
+        self.record_status_errors.setText("\n".join(visible_errors))
+        self.record_status_errors.setToolTip(
+            "\n".join(str(errors[key]) for key in errors if errors.get(key))
+        )
+        self.record_status_errors.setVisible(bool(visible_errors))
+        self.record_status_zone.setText(
+            self._t(f"기준 시간대 · {time_zone}", f"Time zone · {time_zone}")
+            if has_room else self._t("이 PC 시간 기준", "This PC's local time")
+        )
+        self.record_status_mobile.setVisible(has_room)
 
     def show_create(self):
         self._set_message(self.create_error, "")
-        self.pages.setCurrentIndex(self.PAGE_CREATE)
+        self._show_page(self.PAGE_CREATE)
         self.group_name.setFocus()
 
     def show_join(self):
         self._set_message(self.join_error, "")
-        self.pages.setCurrentIndex(self.PAGE_JOIN)
+        self._show_page(self.PAGE_JOIN)
         self.invite_code.setFocus()
 
     def show_leave(self):
@@ -804,7 +1084,7 @@ class SettingsDialog(QDialog):
         self.leave_room_name.setText(
             str(group.get("name") or self._t("친구 그룹", "Study room"))
         )
-        self.pages.setCurrentIndex(self.PAGE_LEAVE)
+        self._show_page(self.PAGE_LEAVE)
         self.leave_submit.setFocus()
 
     def _owner_context(self):
@@ -815,37 +1095,60 @@ class SettingsDialog(QDialog):
         return str(group["id"]), str(user_id)
 
     def show_members(self):
-        if not self._owner_context():
-            self.show_home()
-            return
-        self.pages.setCurrentIndex(self.PAGE_MEMBERS)
+        self.show_home()
+        self.home_tabs.setCurrentIndex(self.TAB_ROOM)
         self.load_members()
 
     def _same_owner_context(self, group_id, owner_id):
         return self._owner_context() == (group_id, owner_id)
 
     def load_members(self):
-        context = self._owner_context()
-        if not context:
-            self.show_home()
+        group = self.controller.online.get("group") or {}
+        current_user = (self.controller.online.get("auth") or {}).get("user_id")
+        if not group.get("id") or not current_user:
+            self.members_section.setVisible(False)
             return
         if not self._begin_remote(self.members_error):
             return
-        group_id, owner_id = context
+        _clear_layout(self.members_list_layout)
+        self.members_list_layout.addWidget(
+            self._note(self._t("멤버를 불러오는 중…", "Loading members…"))
+        )
+        group_id = str(group["id"])
+        current_user = str(current_user)
+        owner_id = str(group.get("owner_id") or "")
+        expected_context = (group_id, current_user, owner_id)
 
         def operation(token):
             members = self.controller.client.list_group_members(token, group_id)
-            bans = self.controller.client.list_group_bans(token, group_id)
+            bans = (
+                self.controller.client.list_group_bans(token, group_id)
+                if current_user == owner_id
+                else []
+            )
             return members, bans
 
         def success(value):
             self._finish_remote()
-            if not self._valid() or not self._same_owner_context(group_id, owner_id):
+            current_group = self.controller.online.get("group") or {}
+            current_auth = self.controller.online.get("auth") or {}
+            current_context = (
+                str(current_group.get("id") or ""),
+                str(current_auth.get("user_id") or ""),
+                str(current_group.get("owner_id") or ""),
+            )
+            if not self._valid():
+                return
+            if current_context != expected_context:
+                _clear_layout(self.members_list_layout)
                 return
             members, bans = value
-            self._render_members(group_id, owner_id, members, bans)
+            self._members_loaded_context = expected_context
+            self._render_members(
+                group_id, current_user, owner_id, members, bans
+            )
 
-        controls = self.members_page.findChildren(QPushButton)
+        controls = self.members_section.findChildren(QPushButton)
         self.controller._run_authenticated_action(
             controls,
             operation,
@@ -863,38 +1166,45 @@ class SettingsDialog(QDialog):
             or canonical_nickname(str(member.get("user_id") or ""))
         )
 
-    def _render_members(self, group_id, owner_id, members, bans):
+    def _render_members(
+        self, group_id, current_user, owner_id, members, bans
+    ):
         _clear_layout(self.members_list_layout)
-        active = [row for row in members if str(row.get("user_id")) != owner_id]
         blocked_ids = {str(row.get("user_id")) for row in bans}
         known = {
             str(row.get("user_id")): self._member_name(row)
             for row in members
             if row.get("user_id")
         }
-        if active:
-            self.members_list_layout.addWidget(
-                self._heading(self._t("현재 멤버", "Current members"))
-            )
-            for member in active:
+        if members:
+            for member in members:
                 target_user = str(member.get("user_id"))
                 row = QHBoxLayout()
-                label = QLabel(self._member_name(member), self.members_page)
+                name = self._member_name(member)
+                suffix = ""
+                if target_user == owner_id:
+                    suffix = self._t(" · 방장", " · Owner")
+                elif target_user == current_user:
+                    suffix = self._t(" · 나", " · You")
+                label = QLabel(name + suffix, self.members_section)
                 label.setTextFormat(Qt.TextFormat.PlainText)
-                remove = QPushButton(self._t("내보내기", "Remove"), self.members_page)
-                remove.clicked.connect(
-                    lambda _checked=False, user=target_user, name=self._member_name(member):
-                    self.block_member(group_id, owner_id, user, name)
-                )
                 row.addWidget(label)
                 row.addStretch(1)
-                row.addWidget(remove)
+                if current_user == owner_id and target_user != owner_id:
+                    remove = QPushButton(
+                        self._t("내보내기", "Remove"), self.members_section
+                    )
+                    remove.clicked.connect(
+                        lambda _checked=False, user=target_user, member_name=name:
+                        self.block_member(group_id, owner_id, user, member_name)
+                    )
+                    row.addWidget(remove)
                 self.members_list_layout.addLayout(row)
         else:
             self.members_list_layout.addWidget(
-                self._note(self._t("다른 멤버가 없습니다.", "No other members."))
+                self._note(self._t("멤버가 없습니다.", "No members."))
             )
-        if blocked_ids:
+        if current_user == owner_id and blocked_ids:
             self.members_list_layout.addWidget(
                 self._heading(self._t("차단된 계정", "Blocked accounts"))
             )
@@ -902,10 +1212,12 @@ class SettingsDialog(QDialog):
                 row = QHBoxLayout()
                 label = QLabel(
                     known.get(target_user) or canonical_nickname(target_user),
-                    self.members_page,
+                    self.members_section,
                 )
                 label.setTextFormat(Qt.TextFormat.PlainText)
-                unblock = QPushButton(self._t("차단 해제", "Unblock"), self.members_page)
+                unblock = QPushButton(
+                    self._t("차단 해제", "Unblock"), self.members_section
+                )
                 unblock.clicked.connect(
                     lambda _checked=False, user=target_user:
                     self.unblock_member(group_id, owner_id, user)
@@ -964,9 +1276,11 @@ class SettingsDialog(QDialog):
             members, bans = value
             self.controller.online.pop("members", None)
             self.controller.sync_async(force=True)
-            self._render_members(group_id, owner_id, members, bans)
+            self._render_members(
+                group_id, owner_id, owner_id, members, bans
+            )
 
-        controls = self.members_page.findChildren(QPushButton)
+        controls = self.members_section.findChildren(QPushButton)
         self.controller._run_authenticated_action(
             controls,
             operation,
@@ -979,8 +1293,8 @@ class SettingsDialog(QDialog):
         )
 
     def show_account(self):
-        self.refresh_from_controller()
-        self.pages.setCurrentIndex(self.PAGE_ACCOUNT)
+        self.show_home()
+        self.home_tabs.setCurrentIndex(self.TAB_ACCOUNT)
 
     def show_email(self):
         self._set_message(self.email_error, "")
@@ -999,7 +1313,7 @@ class SettingsDialog(QDialog):
             if replacing
             else self._t("계정 만들기", "Create account")
         )
-        self.pages.setCurrentIndex(self.PAGE_EMAIL)
+        self._show_page(self.PAGE_EMAIL)
         self.email_address.setFocus()
 
     def show_login(self):
@@ -1025,7 +1339,7 @@ class SettingsDialog(QDialog):
         self.login_password.setEnabled(True)
         self.email_login_compat.setChecked(False)
         self._update_login_enabled()
-        self.pages.setCurrentIndex(self.PAGE_LOGIN)
+        self._show_page(self.PAGE_LOGIN)
         self.login_email.setFocus()
 
     def show_recover(self):
@@ -1036,7 +1350,7 @@ class SettingsDialog(QDialog):
         )
         self.recover_acknowledge.setVisible(active_guest)
         self.recover_acknowledge.setChecked(False)
-        self.pages.setCurrentIndex(self.PAGE_RECOVER)
+        self._show_page(self.PAGE_RECOVER)
         self.recover_username.setFocus()
 
     def _update_login_mode(self, checked):
@@ -1095,7 +1409,7 @@ class SettingsDialog(QDialog):
         self.time_goal.setValue(self._time_at_open)
         self.answer_goal.setValue(self._answers_at_open)
         self._share_deck_at_open = bool(
-            self.controller.online.get("share_deck_name", False)
+            self.controller.online.get("share_deck_name", True)
         )
         self.share_deck_name.setChecked(self._share_deck_at_open)
         index = self.language.findData(self._locale_at_open)
@@ -1103,27 +1417,25 @@ class SettingsDialog(QDialog):
         self._update_save_enabled()
 
     def save_settings(self):
-        previous_time = self.controller.tracker.time_goal_minutes
-        previous_answers = self.controller.tracker.card_goal
-        previous_locale = self.controller.locale
-        had_share_deck = "share_deck_name" in self.controller.online
-        previous_share_deck = self.controller.online.get("share_deck_name")
-        self.controller.tracker.time_goal_minutes = self.time_goal.value()
-        self.controller.tracker.card_goal = self.answer_goal.value()
-        self.controller.online["share_deck_name"] = self.share_deck_name.isChecked()
-        locale = self.language.currentData()
-        self.controller.locale = locale if locale in ("ko", "en") else "ko"
+        changes = {}
+        # Only submit fields edited in this dialog. Values changed from the panel
+        # while this window was open must not be replaced by this stale draft.
+        if self.time_goal.value() != self._time_at_open:
+            changes["time_goal_minutes"] = validate_goal(
+                self.time_goal.value(), maximum=TIME_GOAL_MAX_MINUTES
+            )
+        if self.answer_goal.value() != self._answers_at_open:
+            changes["card_goal"] = validate_goal(
+                self.answer_goal.value(), maximum=ANSWER_GOAL_MAX
+            )
+        if self.share_deck_name.isChecked() != self._share_deck_at_open:
+            changes["share_deck_name"] = self.share_deck_name.isChecked()
+        if self.language.currentData() != self._locale_at_open:
+            locale = self.language.currentData()
+            changes["locale"] = locale if locale in ("ko", "en") else "ko"
         try:
-            self.controller.save()
+            self.controller.update_local_settings(**changes)
         except Exception as error:
-            self.controller.tracker.time_goal_minutes = previous_time
-            self.controller.tracker.card_goal = previous_answers
-            self.controller.locale = previous_locale
-            if had_share_deck:
-                self.controller.online["share_deck_name"] = previous_share_deck
-            else:
-                self.controller.online.pop("share_deck_name", None)
-            self.controller.refresh()
             self._set_message(
                 self.home_error,
                 self._t(
@@ -1132,8 +1444,6 @@ class SettingsDialog(QDialog):
                 ),
             )
             return
-        self.controller.refresh()
-        self.controller.sync_async(force=True)
         self.accept()
 
     def _confirm_invite_rotation(self):
@@ -1210,15 +1520,39 @@ class SettingsDialog(QDialog):
         if not code or code == "—":
             return
         QApplication.clipboard().setText(code)
-        self.copy_feedback.setText(self._t("복사됨", "Copied"))
-        QTimer.singleShot(1800, self._clear_copy_feedback)
+        self._show_copy_feedback(
+            self.copy_invite_button, self._t("코드 복사", "Copy code")
+        )
 
-    def _clear_copy_feedback(self):
-        if self._valid() and hasattr(self, "copy_feedback"):
-            try:
-                self.copy_feedback.clear()
-            except RuntimeError:
-                pass
+    def copy_invite_message(self):
+        try:
+            message = self.controller.invite_message()
+        except (TypeError, ValueError) as error:
+            self._set_message(self.home_error, str(error))
+            return
+        QApplication.clipboard().setText(message)
+        self._show_copy_feedback(
+            self.copy_invite_message_button,
+            self._t("초대 복사", "Copy invite"),
+        )
+
+    def _show_copy_feedback(self, button, normal_text):
+        generation = self._copy_feedback_generation.get(button, 0) + 1
+        self._copy_feedback_generation[button] = generation
+        button.setMinimumWidth(max(button.minimumWidth(), button.sizeHint().width()))
+        button.setText(self._t("복사됨", "Copied"))
+        QTimer.singleShot(
+            2000,
+            lambda: self._clear_copy_feedback(button, normal_text, generation),
+        )
+
+    def _clear_copy_feedback(self, button, normal_text, generation):
+        if not self._valid() or self._copy_feedback_generation.get(button) != generation:
+            return
+        try:
+            button.setText(normal_text)
+        except RuntimeError:
+            pass
 
     def _valid(self):
         return self._alive and not self.controller.closed
@@ -1251,8 +1585,9 @@ class SettingsDialog(QDialog):
         return handle
 
     def create_group(self):
-        name = self.group_name.text().strip()
-        if not name:
+        try:
+            name = normalize_room_name(self.group_name.text())
+        except ValueError:
             self._set_message(
                 self.create_error,
                 self._t("방 이름을 입력해 주세요.", "Enter a room name."),
@@ -1304,10 +1639,11 @@ class SettingsDialog(QDialog):
         )
 
     def join_group(self):
-        code = "".join(self.invite_code.text().split()).upper()
-        self.invite_code.setText(code)
-        allowed = set("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
-        if len(code) != 4 or any(character not in allowed for character in code):
+        try:
+            code = validate_invite_code(self.invite_code.text())
+        except ValueError:
+            code = "".join(self.invite_code.text().split()).upper()
+            self.invite_code.setText(code)
             self._set_message(
                 self.join_error,
                 self._t(
@@ -1316,6 +1652,7 @@ class SettingsDialog(QDialog):
                 ),
             )
             return
+        self.invite_code.setText(code)
         if not self._begin_remote(self.join_error):
             return
         user_id = (self.controller.online.get("auth") or {}).get("user_id")
@@ -1370,24 +1707,36 @@ class SettingsDialog(QDialog):
         if not self._begin_remote(self.leave_error):
             return
 
+        user_id = (self.controller.online.get("auth") or {}).get("user_id")
+
         def success(_result):
             self._finish_remote()
             current = self.controller.online.get("group") or {}
             if current.get("id") == group_id:
-                user_id = (self.controller.online.get("auth") or {}).get("user_id")
-                if user_id and hasattr(self.controller, "discard_room_outbox"):
-                    self.controller.discard_room_outbox(user_id, group_id)
-                self.controller.online.pop("group", None)
-                self.controller.online.pop("members", None)
-                _apply_group_time_zone(self.controller, None)
-            self.controller.save()
-            self.controller.refresh()
+                if user_id and hasattr(self.controller, "leave_current_room_locally"):
+                    self.controller.leave_current_room_locally(user_id, group_id)
+                else:
+                    if user_id and hasattr(self.controller, "discard_room_outbox"):
+                        self.controller.discard_room_outbox(user_id, group_id)
+                    self.controller.online.pop("group", None)
+                    self.controller.online.pop("members", None)
+                    _apply_group_time_zone(self.controller, None)
+                    self.controller.save()
+                    self.controller.refresh()
             if self._valid():
                 self.show_home()
 
+        def operation(token):
+            try:
+                return self.controller.client.leave_group(token, str(group_id))
+            except SupabaseError as error:
+                if _already_left_error(error):
+                    return {"already_left": True}
+                raise
+
         self.controller._run_authenticated_action(
             [self.leave_back, self.leave_submit],
-            lambda token: self.controller.client.leave_group(token, str(group_id)),
+            operation,
             success,
             self._t("방에서 나가지 못했습니다.", "Could not leave the room."),
             on_error=self._remote_error(

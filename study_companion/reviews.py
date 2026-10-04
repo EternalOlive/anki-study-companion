@@ -13,6 +13,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from .activity import normalize_review_time_ms
 from .study_day import DEFAULT_TIME_ZONE, study_day
 
 
@@ -28,14 +29,17 @@ class ReviewHistory:
         self,
         state: dict[str, Any],
         now_ms: Callable[[], int] | None = None,
+        clock: Callable[[], float] | None = None,
     ):
         self.state = state
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self._clock = clock or time.time
         if not isinstance(self.state.get("collections"), dict):
             self.state["collections"] = {}
         if not isinstance(self.state.get("routes"), dict):
             self.state["routes"] = {}
         self.state["version"] = 1
+        self._normalize_cached_review_times()
 
     def migrate_study_days(
         self,
@@ -177,7 +181,7 @@ class ReviewHistory:
             try:
                 ease = int(raw_ease)
                 review_type = int(raw_type)
-                time_ms = max(0, int(raw_time))
+                time_ms = normalize_review_time_ms(raw_time)
             except (TypeError, ValueError, OverflowError):
                 continue
             if ease not in VALID_EASES or review_type not in VALID_REVIEW_TYPES:
@@ -225,7 +229,7 @@ class ReviewHistory:
             observed = True
             for event in day_state.get("events", {}).values():
                 if isinstance(event, dict):
-                    total_ms += max(0, _integer(event.get("time_ms")))
+                    total_ms += _cached_review_time_ms(event.get("time_ms"))
                     answers += 1
         if not observed:
             return None
@@ -285,7 +289,7 @@ class ReviewHistory:
                 for event_key in sorted(day_state.get("events", {})):
                     event = day_state["events"][event_key]
                     sent_value = {
-                        "time_ms": max(0, _integer(event.get("time_ms"))),
+                        "time_ms": _cached_review_time_ms(event.get("time_ms")),
                         "changed_at": max(0, _integer(event.get("changed_at"))),
                     }
                     if ack_reviews.get(event_key) == sent_value:
@@ -315,7 +319,39 @@ class ReviewHistory:
                 batches.extend(_chunks(source, day, reviews, removals))
                 if not reviews and not removals and not ack.get("activated"):
                     batches.append(_batch(source, day, [], []))
+        self._update_pending_since(route, bool(batches))
         return batches
+
+    def pending_summary(
+        self,
+        user_id: str,
+        group_id: str,
+        since_day: str | None = None,
+        *,
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Describe pending review batches for one account and room.
+
+        The first detected pending time is stored with the delivery route, so
+        restarting Anki does not reset the displayed delay. A late
+        acknowledgement only clears it when no newer review change remains.
+        Times returned here are Unix seconds, matching ``SyncOutbox``.
+        """
+        batches = self.pending(user_id, group_id, since_day=since_day)
+        route = self._route_state(str(user_id), str(group_id))
+        pending_since = route.get("pending_since") if batches else None
+        try:
+            oldest = float(pending_since)
+        except (TypeError, ValueError, OverflowError):
+            oldest = None
+        current = float(self._clock()) if now is None else float(now)
+        return {
+            "count": len(batches),
+            "oldest_queued_at": oldest,
+            "oldest_age_seconds": (
+                max(0.0, current - oldest) if oldest is not None else None
+            ),
+        }
 
     def mark_route_days(
         self,
@@ -448,7 +484,7 @@ class ReviewHistory:
             try:
                 review_id = _identifier(event["id"])
                 card_id = _identifier(event["card_id"])
-                time_ms = max(0, int(event["time_ms"]))
+                time_ms = normalize_review_time_ms(event["time_ms"])
                 changed_at = max(0, int(event["changed_at"]))
             except (KeyError, TypeError, ValueError, OverflowError):
                 continue
@@ -470,6 +506,10 @@ class ReviewHistory:
             ack_removed[event_key] = changed_at
             ack_reviews.pop(event_key, None)
         ack["activated"] = True
+        # Re-evaluate after applying this exact acknowledgement. If a newer
+        # observation arrived while the request was in flight, ``pending``
+        # remains non-empty and preserves the original waiting time.
+        self.pending(str(user_id), str(group_id))
 
     def invalidate_route(self, user_id: str, group_id: str) -> None:
         """Forget delivery acknowledgements after a room membership is reset."""
@@ -502,8 +542,62 @@ class ReviewHistory:
         groups = users.setdefault(user_id, {})
         return groups.setdefault(group_id, {"sources": {}})
 
+    def _update_pending_since(self, route: dict[str, Any], has_pending: bool) -> None:
+        if has_pending:
+            if route.get("pending_since") is None:
+                route["pending_since"] = max(0.0, float(self._clock()))
+        else:
+            route.pop("pending_since", None)
+
     def _next_version(self, previous: int) -> int:
         return max(_integer(self._now_ms()), previous + 1, 1)
+
+    def _normalize_cached_review_times(self) -> None:
+        """Heal legacy event and acknowledgement values in-place."""
+        for source_state in self.state["collections"].values():
+            if not isinstance(source_state, dict):
+                continue
+            days = source_state.get("days", {})
+            if not isinstance(days, dict):
+                continue
+            for day_state in days.values():
+                if not isinstance(day_state, dict):
+                    continue
+                events = day_state.get("events", {})
+                if not isinstance(events, dict):
+                    continue
+                for event in events.values():
+                    if isinstance(event, dict):
+                        event["time_ms"] = _cached_review_time_ms(
+                            event.get("time_ms")
+                        )
+
+        for groups in self.state["routes"].values():
+            if not isinstance(groups, dict):
+                continue
+            for route in groups.values():
+                if not isinstance(route, dict):
+                    continue
+                sources = route.get("sources", {})
+                if not isinstance(sources, dict):
+                    continue
+                for route_source in sources.values():
+                    if not isinstance(route_source, dict):
+                        continue
+                    days = route_source.get("days", {})
+                    if not isinstance(days, dict):
+                        continue
+                    for acknowledgement in days.values():
+                        if not isinstance(acknowledgement, dict):
+                            continue
+                        reviews = acknowledgement.get("reviews", {})
+                        if not isinstance(reviews, dict):
+                            continue
+                        for sent_value in reviews.values():
+                            if isinstance(sent_value, dict):
+                                sent_value["time_ms"] = _cached_review_time_ms(
+                                    sent_value.get("time_ms")
+                                )
 
 
 def _chunks(
@@ -556,6 +650,10 @@ def _integer(value: Any) -> int:
         return 0
 
 
+def _cached_review_time_ms(value: Any) -> int:
+    return normalize_review_time_ms(_integer(value))
+
+
 def _fully_acknowledged(
     day_state: dict[str, Any], acknowledgement: dict[str, Any]
 ) -> bool:
@@ -565,7 +663,7 @@ def _fully_acknowledged(
     acknowledged_removals = acknowledgement.get("removed", {})
     for event_key, event in day_state.get("events", {}).items():
         expected = {
-            "time_ms": max(0, _integer(event.get("time_ms"))),
+            "time_ms": _cached_review_time_ms(event.get("time_ms")),
             "changed_at": max(0, _integer(event.get("changed_at"))),
         }
         if acknowledged_reviews.get(event_key) != expected:

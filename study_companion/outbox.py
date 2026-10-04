@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 
@@ -15,8 +16,9 @@ class SyncOutbox:
     are monotonic.
     """
 
-    def __init__(self, state: dict[str, Any]):
+    def __init__(self, state: dict[str, Any], *, clock=time.time):
         self.state = state
+        self.clock = clock
         self.state.setdefault("entries", {})
         self.state.setdefault("routes", {})
         self.state.setdefault("route_sequence", 0)
@@ -47,7 +49,12 @@ class SyncOutbox:
         existing = self.state["entries"].get(key)
         if existing and int(existing.get("revision", 0)) > int(payload["revision"]):
             return
-        self.state["entries"][key] = dict(payload)
+        queued_at = (
+            existing.get("_queued_at")
+            if isinstance(existing, dict) and existing.get("_queued_at") is not None
+            else self.clock()
+        )
+        self.state["entries"][key] = {**payload, "_queued_at": float(queued_at)}
 
     def pending(
         self, *, user_id: str, group_id: str, device_id: str
@@ -62,6 +69,23 @@ class SyncOutbox:
         # Send the current/newest day first. A stale historical failure must
         # not prevent today's presence and progress from reaching the room.
         return sorted(rows, key=lambda row: (row["study_day"], row["revision"]), reverse=True)
+
+    def pending_summary(
+        self, *, user_id: str, group_id: str, device_id: str, now: float | None = None
+    ) -> dict[str, Any]:
+        rows = self.pending(user_id=user_id, group_id=group_id, device_id=device_id)
+        timestamps = [
+            float(row["_queued_at"])
+            for row in rows
+            if row.get("_queued_at") is not None
+        ]
+        oldest = min(timestamps) if timestamps else None
+        current = float(self.clock() if now is None else now)
+        return {
+            "count": len(rows),
+            "oldest_queued_at": oldest,
+            "oldest_age_seconds": max(0.0, current - oldest) if oldest is not None else None,
+        }
 
     def acknowledge(self, payload: dict[str, Any], revision: int) -> bool:
         key = self.key(
