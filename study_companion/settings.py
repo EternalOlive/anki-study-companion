@@ -569,38 +569,6 @@ class SettingsDialog(QDialog):
         layout.addLayout(row)
         return page
 
-    def _build_members_page(self):
-        page, layout = self._detail_page(self._t("멤버 목록", "Members"))
-        self.members_notice = self._note(
-            self._t(
-                "내보낸 계정은 차단을 해제하기 전까지 이 방에 다시 참여할 수 없습니다.",
-                "Removed accounts cannot rejoin until you unblock them.",
-            )
-        )
-        layout.addWidget(self.members_notice)
-        self.members_list_layout = QVBoxLayout()
-        self.members_list_layout.setContentsMargins(0, 0, 0, 0)
-        self.members_list_layout.setSpacing(8)
-        layout.addLayout(self.members_list_layout)
-        self.members_error = self._error_label()
-        layout.addWidget(self.members_error)
-        layout.addStretch(1)
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        self.members_refresh = QPushButton(self._t("새로고침", "Refresh"), page)
-        self.members_back = QPushButton(self._t("뒤로", "Back"), page)
-        self.members_refresh.clicked.connect(self.load_members)
-        self.members_back.clicked.connect(self.show_home)
-        bottom.addWidget(self.members_refresh)
-        bottom.addWidget(self.members_back)
-        layout.addLayout(bottom)
-        return page
-
-    def _build_account_page(self):
-        # Kept as a stack slot for compatibility with older saved navigation
-        # indices. The account overview now lives in the fixed Account tab.
-        return QWidget(self)
-
     def _build_email_page(self):
         page, layout = self._detail_page(
             self._t("통합 계정 만들기", "Create synced account")
