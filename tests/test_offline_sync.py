@@ -223,6 +223,32 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertIsNone(members)
         self.assertFalse(deck_published)
 
+    def test_unchanged_deck_is_republished_after_45_seconds(self):
+        self.controller.online["share_deck_name"] = True
+        self.controller.online["published_deck"] = {
+            "user_id": "user-a",
+            "group_id": "room-a",
+            "device_id": "device-a",
+            "name": "English",
+            "published_at": 30,
+        }
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 30
+
+        with patch.object(time, "time", return_value=76):
+            self.controller.sync_async()
+            task, _done = self.take_background()
+            _auth, _acks, members, deck_published, _error = task()
+
+        self.assertEqual(
+            self.controller.client.deck_calls,
+            [("room-a", "device-a", "English")],
+        )
+        self.assertIsNone(members)
+        self.assertTrue(deck_published)
+
+
     def test_unchanged_deck_is_republished_before_server_ttl_expires(self):
         self.controller.online["share_deck_name"] = True
         self.controller.online["published_deck"] = {

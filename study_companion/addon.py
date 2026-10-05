@@ -1122,7 +1122,9 @@ class Controller:
             not published_deck_matches
             or (
                 current_deck_name is not None
-                and (deck_publish_age < 0 or deck_publish_age >= 60)
+                # get_group_current_decks drops decks older than 90 seconds; with the
+                # 30-second sync cadence a 45-second refresh keeps them visible.
+                and (deck_publish_age < 0 or deck_publish_age >= 45)
             )
         )
         member_cache_key = (auth["user_id"], group_id, study_day_key)
