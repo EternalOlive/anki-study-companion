@@ -273,6 +273,7 @@ class ActivityTimeline(QWidget):
         self.buckets: dict[int, dict] = {}
         self.selected_slot: int | None = None
         self._record_key = None
+        self._hover_hint = ""
         self.setMinimumHeight(45)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -330,8 +331,25 @@ class ActivityTimeline(QWidget):
             summary = self.panel.tr("오늘 활동: ", "Today's activity: ") + "; ".join(descriptions)
         summary += f" · {self.panel.room_day_label()}"
         self.setAccessibleName(summary)
-        self.setToolTip(summary)
+        # The accessible name lists every bucket for screen readers; the hover
+        # tooltip stays short so empty areas do not show that whole list.
+        self._hover_hint = self._short_summary()
+        self.setToolTip(self._hover_hint)
         self.update()
+
+    def _short_summary(self) -> str:
+        if self.error:
+            text = self.panel.tr("시간대 동기화 지연", "Activity sync delayed")
+        elif not self.known:
+            text = self.panel.tr("시간대 기록 없음", "Timeline unavailable")
+        elif not self.buckets:
+            text = self.panel.tr("오늘 답변 기록 없음", "No answers recorded today")
+        else:
+            text = self.panel.tr(
+                "막대에 마우스를 올려 구간 확인",
+                "Hover a bar for bin details",
+            )
+        return f"{text} · {self.panel.room_day_label()}"
 
     def _description(self, slot: int) -> str:
         bucket = self.buckets[slot]
@@ -358,11 +376,11 @@ class ActivityTimeline(QWidget):
         if slot in self.buckets:
             self.setToolTip(self._description(slot))
         else:
-            self.setToolTip(self.accessibleName())
+            self.setToolTip(self._hover_hint)
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:
-        self.setToolTip(self.accessibleName())
+        self.setToolTip(self._hover_hint)
         super().leaveEvent(event)
 
     def _select_slot(self, slot: int) -> None:
