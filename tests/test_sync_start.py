@@ -33,6 +33,7 @@ class SyncStartTests(TestCase):
         self.controller.tracker = SimpleNamespace(
             records={},
             current_deck_name="English",
+            current_deck_day="2026-10-04",
             today=lambda current: {'seconds': 10, 'answers': 2},
             time_goal_minutes=60, card_goal=100, status='studying')
         self.controller.device_id = 'device'

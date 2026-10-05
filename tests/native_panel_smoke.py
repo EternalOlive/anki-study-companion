@@ -57,7 +57,8 @@ def _load_panel_types():
     ):
         setattr(qt, name, getattr(QtWidgets, name))
     qt.Qt = QtCore.Qt
-    for name in ("QPainter", "QPalette", "QPen"):
+    qt.QPointF = QtCore.QPointF
+    for name in ("QColor", "QFontMetrics", "QPainter", "QPalette", "QPen"):
         setattr(qt, name, getattr(QtGui, name))
     sys.modules["aqt"] = aqt
     sys.modules["aqt.qt"] = qt
@@ -70,6 +71,34 @@ def _load_panel_types():
     from study_companion.tracker import StudyTracker, TIMEZONE
 
     return QtGui, QtWidgets, StudyPanel, StudyTracker, TIMEZONE
+
+
+def _room_day(current):
+    from study_companion.study_day import study_day
+
+    return study_day(current, "Asia/Seoul")
+
+
+def _assert_unclipped(panel):
+    """Wrapped labels in the new sections get the height their text needs.
+
+    The real dock scrolls the panel, so first give it the height its layout
+    asks for at this width; a squeezed fixed-height window is not a clip.
+    """
+    from PyQt6.QtWidgets import QApplication
+
+    needed = panel.layout().totalHeightForWidth(panel.width())
+    if needed > panel.height():
+        panel.resize(panel.width(), needed)
+    QApplication.processEvents()
+    for label in (panel.room_timeline_detail, panel.room_timeline_legend,
+                  panel.weekly_legend, panel.weekly_day_detail):
+        if label.isVisible():
+            assert label.height() >= label.heightForWidth(label.width()), (label.height(), label.heightForWidth(label.width()), label.width(), panel.content.width(), panel.width())
+            assert label.geometry().right() <= panel.content.width()
+    for widget in (panel.room_timeline, panel.weekly_chart):
+        if widget.isVisible():
+            assert widget.width() <= panel.content.width()
 
 
 class FakeController:
@@ -160,7 +189,7 @@ class FakeController:
         days = []
         for offset, answers in zip(range(6, -1, -1), (18, 0, 24, 31, 12, 37, 48)):
             days.append({
-                "day": (current.date() - timedelta(days=offset)).isoformat(),
+                "day": (_room_day(current) - timedelta(days=offset)).isoformat(),
                 "answers": answers,
                 "seconds": answers * 32,
             })
@@ -217,11 +246,28 @@ def main() -> int:
     tracker.status = "studying"
 
     controller = FakeController(tracker, current)
+    room_today = _room_day(current)
+    # Past room days cached per room; the day three days ago failed (gap).
+    controller.online["room_week_stats"] = {
+        "group-1": {
+            (room_today - timedelta(days=offset)).isoformat(): {
+                "friend-a": answers_a, "friend-b": answers_b,
+            }
+            for offset, answers_a, answers_b in (
+                (6, 30, 5), (5, 22, 0), (4, 41, 12), (2, 15, 20), (1, 52, 9),
+            )
+        }
+    }
     local_record = {"seconds": 1450, "answers": 48}
     controller.study_record = lambda current: dict(local_record)
     controller.online["members"].append({
-        "user_id": "self", "study_day": today,
+        "user_id": "self", "study_day": room_today.isoformat(),
         "active_seconds": 30 * 60, "answer_count": 60,
+        "activity_known": True,
+        "activity_buckets": [
+            {"slot": 30, "answer_count": 4, "time_ms": 60000},
+            {"slot": 40, "answer_count": 6, "time_ms": 80000},
+        ],
     })
     panel = StudyPanel(controller)
     panel.resize(340, 900)
@@ -239,11 +285,17 @@ def main() -> int:
     assert not first_row.expanded
     friend["deck_updated_at"] = (current - timedelta(seconds=100)).isoformat()
     panel.refresh()
+    assert first_row.deck.isVisible()
+    friend["deck_updated_at"] = (current - timedelta(days=1)).isoformat()
+    panel.refresh()
     assert not first_row.deck.isVisible()
     friend["deck_updated_at"] = current.isoformat()
     friend["status"] = "paused"
     panel.refresh()
     assert "공부 중 아님" not in first_row.details.text()
+    assert first_row.deck.isVisible()
+    friend["status"] = "offline"
+    panel.refresh()
     assert not first_row.deck.isVisible()
     friend["status"] = "studying"
     panel.refresh()
@@ -252,6 +304,28 @@ def main() -> int:
     app.processEvents()
 
     assert panel.width() == 340
+    assert panel.room_presence.text() == "3명 접속 중 · 나 포함"
+    # Room timeline: slot leader colors, ties gray, legend counts sole leads.
+    from study_companion.room_activity import FRIEND_COLORS, TIE_COLOR, slot_leader
+    room_timeline = panel.room_timeline
+    assert panel.room_activity.isVisible()
+    assert panel.room_activity_title.text() == "방 시간대 · 15분 1등"
+    assert slot_leader(room_timeline.rankings[30]) is None
+    assert slot_leader(room_timeline.rankings[40]) == "self"
+    assert slot_leader(room_timeline.rankings[62]) == "friend-a"
+    assert room_timeline.colors["friend-a"] == FRIEND_COLORS[0]
+    assert room_timeline.colors["friend-b"] == FRIEND_COLORS[1]
+    assert room_timeline.colors["self"] == panel.my_color()
+    assert TIE_COLOR not in room_timeline.colors.values()
+    assert room_timeline.selected_slot == 62
+    assert panel.room_timeline_detail.text() == "19:30–19:45 · 1등 K7M-2RX 7회"
+    assert room_timeline.describe(30) == "11:30–11:45 · 1등 K7M-2RX 4회 · 1등 나 4회"
+    assert "1등&nbsp;2번" in panel.room_timeline_legend.text()
+    assert "K7M-2RX 1등 2번" in panel.room_timeline_legend.accessibleName()
+    assert "나 1등 1번" in panel.room_timeline_legend.accessibleName()
+    assert "T4N-8WA" not in panel.room_timeline_legend.accessibleName()
+    assert "19:30–19:45" in room_timeline.accessibleName()
+    assert "19:30–19:45" not in room_timeline.toolTip()
     assert first_row.details.isVisible()
     assert first_row.activity_timeline.isVisible()
     assert "11:30–11:45" in first_row.activity_timeline.accessibleName()
@@ -263,6 +337,14 @@ def main() -> int:
     from PyQt6.QtTest import QTest
     timeline = first_row.activity_timeline
     assert timeline.selected_slot == 62
+    assert timeline.is_today
+    QTest.keyClick(room_timeline, Qt.Key.Key_Left)
+    assert room_timeline.selected_slot == 40
+    assert panel.room_timeline_detail.text() == "14:00–14:15 · 1등 나 6회"
+    QTest.mouseClick(room_timeline, Qt.MouseButton.LeftButton,
+                     pos=QPoint(1 + round(30.5 * (room_timeline.width() - 2) / 96), 8))
+    assert room_timeline.selected_slot == 30
+    assert "1등 나 4회" in panel.room_timeline_detail.text()
     QTest.keyClick(timeline, Qt.Key.Key_Left)
     assert timeline.selected_slot == 31
     timeline.update_activity(first_row.member)
@@ -293,9 +375,17 @@ def main() -> int:
     first_row.update_member(current_friend)
     assert "시간대 기록 없음" in panel.member_rows["friend-b"].activity_timeline.accessibleName()
     assert panel.history_body.isVisible()
-    assert panel.weekly_bars.isVisible()
-    assert len(panel.weekly_days) == 7
-    assert "오늘 진행 중" in panel.weekly_days[-1].accessibleName()
+    chart = panel.weekly_chart
+    assert chart.isVisible()
+    assert len(chart.days) == 7 and chart.days[-1] == room_today.isoformat()
+    assert [item["key"] for item in chart.series] == ["self", "friend-a", "friend-b"]
+    assert chart.series[0]["me"] and chart.series[0]["values"][-1] == 48
+    assert chart.series[1]["values"] == [30, 22, 41, None, 15, 52, 42]
+    assert chart.series[2]["color"] == FRIEND_COLORS[1]
+    assert "오늘 진행 중" in chart.day_description(6)
+    assert "K7M-2RX 확인 못 함" in chart.day_description(3)
+    assert "끊긴 선" in chart.toolTip()
+    assert panel.weekly_legend.isVisible()
     assert "이전 7일보다" in panel.weekly_summary.toolTip()
     assert "\n" not in panel.weekly_summary.text()
     assert not panel.deck_history_body.isVisible()
@@ -428,11 +518,20 @@ def main() -> int:
     assert online_row.time.text() == "—" and online_row.answers.text() == "—"
     online_row.update_member(controller.online["members"][1])
     # Clicking the numeric side of the row and keyboard Space both toggle details.
-    panel.weekly_days[-1].setFocus()
-    QTest.keyClick(panel.weekly_days[-1], Qt.Key.Key_Space)
+    chart.setFocus()
+    QTest.keyClick(chart, Qt.Key.Key_Space)
     assert panel.weekly_day_detail.isVisible()
-    assert "48회" in panel.weekly_day_detail.text()
-    assert "오늘 진행 중" in panel.weekly_days[-1].accessibleName()
+    assert chart.selected_index == 6
+    assert "나 48회" in panel.weekly_day_detail.text()
+    assert "K7M-2RX 42회" in panel.weekly_day_detail.text()
+    QTest.keyClick(chart, Qt.Key.Key_Left)
+    assert chart.selected_index == 5
+    assert "K7M-2RX 52회" in panel.weekly_day_detail.text()
+    panel.refresh()
+    assert chart.selected_index == 5
+    QTest.keyClick(chart, Qt.Key.Key_Right)
+    assert "오늘 진행 중" in chart.accessibleDescription()
+    _assert_unclipped(panel)
     assert "마지막 확인" in panel.weekly_summary.toolTip()
     numeric_point = first_row.time.geometry().center()
     QTest.mouseClick(first_row.identity, Qt.MouseButton.LeftButton, pos=numeric_point)
@@ -452,10 +551,21 @@ def main() -> int:
     assert not panel.expand_panel.isVisible()
     assert panel.minimumWidth() == 280
 
+    mine["activity_buckets"] = [
+        {"slot": 30, "answer_count": 4, "time_ms": 60000},
+        {"slot": 40, "answer_count": 6, "time_ms": 80000},
+    ]
+    panel.refresh()
+    app.processEvents()
+    _assert_unclipped(panel)
     OUTPUT.mkdir(exist_ok=True)
     korean = OUTPUT / "native-ko.png"
     if not panel.grab().save(str(korean)):
         raise RuntimeError(f"could not save {korean}")
+    room_crop = OUTPUT / "native-room-timeline.png"
+    assert panel.room_activity.grab().save(str(room_crop))
+    weekly_crop = OUTPUT / "native-weekly-lines.png"
+    assert panel.history_body.grab().save(str(weekly_crop))
 
     original_order = list(panel.member_order)
     controller.online["members"].reverse()
@@ -471,7 +581,12 @@ def main() -> int:
     assert panel.own_time.accessibleName() == "Edit study time goal · 24:10 / 1:00:00"
     assert panel.history_toggle.isChecked()
     assert panel.weekly_title.text() == "Recent 7 days"
-    assert "today in progress" in panel.weekly_days[-1].accessibleName()
+    assert "today in progress" in panel.weekly_chart.day_description(6)
+    assert panel.room_presence.text() == "3 online · including you"
+    assert panel.room_activity_title.text() == "Room timeline · top per 15 min"
+    assert "#1 K7M-2RX 7" in panel.room_timeline.describe(62)
+    assert "1st&nbsp;×2" in panel.room_timeline_legend.text()
+    _assert_unclipped(panel)
     assert panel.collapse_panel.toolTip() == "Collapse panel"
     assert panel.format_duration(3600) == "1:00:00"
 
@@ -497,9 +612,23 @@ def main() -> int:
     assert "5:00:00" in panel.own_time.accessibleName()
     expected_foreground = panel.palette().color(QtGui.QPalette.ColorRole.WindowText).name()
     assert expected_foreground in first_row.identity_text.styleSheet()
-    assert panel.grab().save(str(OUTPUT / "native-ko-dark.png"))
+    _assert_unclipped(panel)
+    dark_shot = OUTPUT / "native-ko-dark.png"
+    assert panel.grab().save(str(dark_shot))
+    assert panel.room_activity.grab().save(str(OUTPUT / "native-room-timeline-dark.png"))
+    assert panel.history_body.grab().save(str(OUTPUT / "native-weekly-lines-dark.png"))
     tracker.time_goal_minutes = 60
     app.setPalette(original_palette)
+    app.processEvents()
+
+    # native-ko.png is already at the 280px minimum (collapse/expand resets
+    # the width); also check the common 320px dock width with the normal font.
+    panel.resize(320, panel.height())
+    panel.refresh()
+    app.processEvents()
+    _assert_unclipped(panel)
+    narrow = OUTPUT / "native-ko-320.png"
+    assert panel.grab().save(str(narrow))
 
     saved_group = controller.online["group"]
     saved_members = controller.online["members"]
@@ -510,6 +639,7 @@ def main() -> int:
     no_room.show()
     app.processEvents()
     assert no_room.no_room_actions.isVisible()
+    assert not no_room.room_activity.isVisible()
     assert not no_room.member_empty.isVisible()
     no_room.create_room.click()
     no_room.join_room.click()
@@ -563,7 +693,8 @@ def main() -> int:
     QTest.keyClick(large.goal_editor, Qt.Key.Key_Escape)
     assert large_unknown_row.activity_timeline.isVisible()
     assert "시간대 기록 없음" in large_unknown_row.activity_timeline.accessibleName()
-    assert large.weekly_days[-1].width() >= 20
+    assert large.weekly_chart.width() <= large.content.width()
+    _assert_unclipped(large)
 
     korean_large = OUTPUT / "native-ko-large-280.png"
     if not large.grab().save(str(korean_large)):
@@ -601,6 +732,7 @@ def main() -> int:
     assert large_row.identity.toolTip().startswith("FriendWith")
     assert "\u200b" in large_row.identity_text.text()
 
+    _assert_unclipped(large)
     english_large = OUTPUT / "native-en-large-320.png"
     if not large.grab().save(str(english_large)):
         raise RuntimeError(f"could not save {english_large}")
@@ -609,6 +741,10 @@ def main() -> int:
     print(f"native panel smoke ok: {english}")
     print(f"native panel smoke ok: {korean_large}")
     print(f"native panel smoke ok: {english_large}")
+    print(f"native panel smoke ok: {narrow}")
+    print(f"native panel smoke ok: {dark_shot}")
+    print(f"native panel smoke ok: {room_crop}")
+    print(f"native panel smoke ok: {weekly_crop}")
     large.close()
     return 0
 

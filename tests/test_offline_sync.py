@@ -1,5 +1,5 @@
 import ast
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import time
@@ -22,6 +22,14 @@ class FakeClient:
         self.review_fail_days = set()
         self.review_failures = {}
         self.member_error = None
+        self.day_stat_calls = []
+        self.day_stat_failures = set()
+
+    def fetch_group_day_stats(self, token, group_id, day):
+        self.day_stat_calls.append((group_id, day))
+        if day in self.day_stat_failures:
+            raise SupabaseError("offline", status=503)
+        return [{"user_id": "friend", "answer_count": len(self.day_stat_calls)}]
 
     def upsert_profile(self, token, user_id, display_name):
         return None
@@ -106,6 +114,7 @@ class OfflineSyncTests(unittest.TestCase):
         controller._access_token = lambda: "token"
         controller.tracker = SimpleNamespace(
             current_deck_name="English",
+            current_deck_day="2026-10-04",
             records={
                 "2026-10-03": {"seconds": 120, "answers": 8},
                 "2026-10-04": {"seconds": 10, "answers": 1},
@@ -353,6 +362,87 @@ class OfflineSyncTests(unittest.TestCase):
         self.assertEqual(members, [])
         self.assertTrue(deck_published)
         self.assertEqual(self.controller.client.deck_calls, [("room-a", "device-a", None)])
+
+    def test_past_week_days_are_read_once_with_member_refresh_and_cached(self):
+        self.controller.client.day_stat_failures.add("2026-10-01")
+        self.controller.sync_async(force=True)
+        self.finish_background()
+
+        fetched = [day for _group, day in self.controller.client.day_stat_calls]
+        self.assertEqual(fetched, [
+            "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01",
+            "2026-10-02", "2026-10-03",
+        ])
+        cached = self.controller.online["room_week_stats"]["room-a"]
+        self.assertNotIn("2026-10-01", cached)  # failed day stays a gap
+        self.assertNotIn("2026-10-04", cached)  # today comes from members
+        self.assertEqual(cached["2026-10-03"], {"friend": 6})
+        self.assertNotIn("last_error", self.controller.online)
+
+        self.controller.client.day_stat_calls.clear()
+        self.controller.client.day_stat_failures.clear()
+        self.controller.sync_async(force=True)
+        self.finish_background()
+        self.assertEqual(self.controller.client.day_stat_calls, [("room-a", "2026-10-01")])
+        self.assertEqual(len(self.controller.online["room_week_stats"]["room-a"]), 6)
+
+        self.controller.client.day_stat_calls.clear()
+        self.controller.sync_async(force=True)
+        self.finish_background()
+        self.assertEqual(self.controller.client.day_stat_calls, [])
+
+    def test_week_days_are_not_read_while_panel_is_hidden_or_cache_is_fresh(self):
+        self.controller.panel = SimpleNamespace(isVisible=lambda: False)
+        self.controller.sync_async(force=True)
+        self.finish_background()
+        self.assertEqual(self.controller.client.day_stat_calls, [])
+
+        self.controller.panel = SimpleNamespace(isVisible=lambda: True)
+        self.controller.online["members"] = [{"user_id": "friend"}]
+        self.controller._member_cache_key = ("user-a", "room-a", "2026-10-04")
+        self.controller._last_member_fetch_at = 100
+        with patch.object(time, "time", return_value=120):
+            self.controller.sync_async()
+            self.finish_background()
+        self.assertEqual(self.controller.client.day_stat_calls, [])
+
+    def test_week_days_are_skipped_when_the_member_read_fails(self):
+        self.controller.client.member_error = SupabaseError("read offline", status=503)
+        self.controller.sync_async(force=True)
+        self.finish_background()
+        self.assertEqual(self.controller.client.day_stat_calls, [])
+
+    def test_published_status_stays_studying_for_two_minutes(self):
+        self.controller.tracker.status = "paused"
+        self.controller.tracker.last_input_at = self.clock - timedelta(seconds=90)
+        self.controller.sync_async()
+        sent = self.controller.sync_outbox.pending(
+            user_id="user-a", group_id="room-a", device_id="device-a"
+        )
+        self.assertEqual({row["study_day"]: row["status"] for row in sent}["2026-10-04"], "studying")
+
+        self.__class__.clock = self.clock + timedelta(seconds=31)
+        self.controller.sync_in_flight = False
+        self.controller.sync_async()
+        sent = self.controller.sync_outbox.pending(
+            user_id="user-a", group_id="room-a", device_id="device-a"
+        )
+        self.assertEqual({row["study_day"]: row["status"] for row in sent}["2026-10-04"], "paused")
+
+    def test_deck_from_a_previous_room_day_is_cleared_not_republished(self):
+        self.controller.tracker.current_deck_day = "2026-10-03"
+        self.controller.tracker.status = "stopped"
+        self.controller.sync_async()
+        task, _done = self.take_background()
+        task()
+        self.assertEqual(self.controller.client.deck_calls, [("room-a", "device-a", None)])
+
+    def test_deck_is_shared_while_connected_even_outside_review(self):
+        self.controller.tracker.status = "stopped"
+        self.controller.sync_async()
+        task, _done = self.take_background()
+        task()
+        self.assertEqual(self.controller.client.deck_calls, [("room-a", "device-a", "English")])
 
     def test_member_read_failure_does_not_discard_successful_upload_acks(self):
         self.controller.review_history.observe(
