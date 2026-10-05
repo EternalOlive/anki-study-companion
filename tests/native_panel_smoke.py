@@ -257,6 +257,8 @@ def main() -> int:
     assert "11:30–11:45" in first_row.activity_timeline.accessibleName()
     assert "Asia/Seoul · 04:00" in first_row.activity_timeline.accessibleName()
     assert "4회" in first_row.activity_timeline.accessibleName()
+    # Hovering an empty area must not show the full per-bin accessible list.
+    assert "11:30–11:45" not in first_row.activity_timeline.toolTip()
     from PyQt6.QtCore import Qt, QPoint
     from PyQt6.QtTest import QTest
     timeline = first_row.activity_timeline
