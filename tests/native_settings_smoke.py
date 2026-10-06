@@ -69,7 +69,7 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    def create_group(self, token, name, time_zone):
+    def create_group(self, token, name, time_zone, is_public=False):
         self.calls.append(("create_group", token, name, time_zone))
         return {
             "id": "room-created",
@@ -78,7 +78,21 @@ class FakeClient:
             "owner_id": "user-local",
             "time_zone": time_zone,
             "day_start_hour": 4,
+            "is_public": is_public,
         }
+
+    def list_public_study_groups(self, token, timezone_name="Asia/Seoul"):
+        self.calls.append(("list_public_study_groups", token, timezone_name))
+        return [
+            {
+                "id": "public-room-1",
+                "name": "Public Study Room",
+                "member_count": 3,
+                "studying_count": 1,
+                "invite_code": "PUB1",
+                "time_zone": timezone_name,
+            }
+        ]
 
     def join_group(self, token, code):
         self.calls.append(("join_group", token, code))
@@ -616,6 +630,29 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     dialog.close()
 
 
+def check_public_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
+    controller = FakeController()
+    dialog = _fresh_dialog(SettingsDialog, controller)
+    app.processEvents()
+
+    _button(dialog, QtWidgets, "초대 코드로 참여").click()
+    app.processEvents()
+    assert dialog.pages.currentIndex() == dialog.PAGE_JOIN
+    assert dialog.refresh_public_button.isVisible()
+    assert dialog.quick_join_button.isVisible()
+
+    dialog.refresh_public_button.click()
+    assert controller.pending is not None
+    controller.finish_remote()
+    app.processEvents()
+    assert ("list_public_study_groups", "token", "Asia/Seoul") in controller.client.calls
+    visible = _visible_text(dialog, QtWidgets)
+    assert "Public Study Room" in visible
+    assert "3/8" in visible
+
+    dialog.close()
+
+
 def check_owner_invite_rotation(app, QtWidgets, SettingsDialog):
     owner = FakeController()
     owner.online["group"] = {
@@ -981,6 +1018,7 @@ def main():
     check_home_draft_and_save(app, QtWidgets, SettingsDialog)
     check_record_status_and_invite_copy(app, QtWidgets, SettingsDialog)
     check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
+    check_public_room_flows(app, QtWidgets, SettingsDialog, SupabaseError)
     check_owner_invite_rotation(app, QtWidgets, SettingsDialog)
     check_owner_member_management(app, QtWidgets, SettingsDialog)
     check_account_states(app, QtWidgets, SettingsDialog)

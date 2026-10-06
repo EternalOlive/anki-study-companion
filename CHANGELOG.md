@@ -9,8 +9,42 @@
 - `20261004_synced_review_totals.sql`: 공개 합계의 시간·답변 수는 동기화된 복습 이벤트를 기준으로 계산한다. `record_device_day`는 목표와 현재 상태의 보조 경로다.
 - `20261004_room_time_zone.sql`: 날짜는 UTC나 한국 자정이 아니라 방 시간대의 매일 04:00 경계를 사용한다. 웹 클라이언트도 방의 `time_zone`과 `day_start_hour`로 날짜를 계산해야 한다.
 - `20261004_leave_study_group_idempotent.sql`: 이미 내보내졌거나 나간 사용자의 반복 탈퇴 요청을 성공으로 처리한다. 다른 멤버·차단 기록은 변경하지 않는다.
+- `20261006_room_management.sql`: 방 관리 RPC 4종(`update_room_timezone`, `transfer_room_ownership`, `kick_room_member`, `cleanup_inactive_members`)을 추가했다. 방장만 호출 가능하며 JWT 인증이 필요하다.
+- `20261006_public_rooms.sql`: `study_groups` 테이블에 `is_public` 플래그 및 인덱스를 추가하고, 공개 방 목록을 필터링·추천 정렬하는 `list_public_study_groups(user_timezone)` RPC와 `create_study_group` 공개 플래그 파라미터를 추가했다.
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
+
+## 공개 스터디방 및 방 관리 — 2026-10-06
+
+### 서버 및 데이터베이스 계약
+- **공개 방 시스템 (`supabase/migrations/20261006_public_rooms.sql`)**:
+  - `study_groups.is_public boolean default false` 컬럼 및 부분 인덱스 `idx_study_groups_public` 추가.
+  - `create_study_group(group_name text, room_timezone text default 'Asia/Seoul', room_is_public boolean default false)`: 방 생성 시 공개 여부 인자 추가 (기본값 `false`).
+  - `list_public_study_groups(user_timezone text default 'Asia/Seoul')`: 인원 8명 미만인 공개 방을 조회하며, 사용자 시간대 일치 우선 → 최근 90초 내 실시간 공부 중(`device_daily_stats.status = 'studying'`) 인원수 내림차순 → 총 멤버수 내림차순 → 생성일 최신순으로 정렬하여 최대 30개 반환. 호출자가 차단(`study_group_bans`)된 방은 제외.
+- **방 관리 기능 (`supabase/migrations/20261006_room_management.sql`)**:
+  - `update_room_timezone(target_group uuid, new_timezone text)`: 방장 권한으로 방 시간대 변경. 04:00 고정 기준일 불변성 검증 트리거(`guard_study_group_calendar`) 유지.
+  - `transfer_room_ownership(target_group uuid, new_owner_id uuid)`: 해당 방의 기존 멤버에게 방장 권한 위임.
+  - `kick_room_member(target_group uuid, target_user uuid)`: 멤버 강퇴 (해당 방의 `daily_stats` 및 `group_members` 행 삭제, 방장 본인은 강퇴 불가).
+  - `cleanup_inactive_members(target_group uuid, days_inactive integer default 14)`: 지정 일수(기본 14일) 동안 동기화(`anki_review_day_markers`, `device_daily_stats`)가 없는 비방장 멤버 일괄 정리.
+
+### 클라이언트 API (`study_companion/api.py`, `study_companion/online.py`)
+- `SupabaseClient`에 `update_room_timezone`, `transfer_room_ownership`, `kick_room_member`, `cleanup_inactive_members`, `list_public_study_groups` 메서드 추가.
+- `create_group`에 `is_public: bool = False` 선택 인자 지원 (하위 호환성 유지).
+- `api.py` 모듈에서 상기 RPC 래퍼 함수들을 export하여 타 클라이언트 및 외부 모듈 연동 지원.
+
+### UI / UX 개편 (`study_companion/settings.py`)
+- **방 미참여 시 메인 화면 (클릭 0회 즉시 탐색)**:
+  - '초대 코드로 참여'를 누르지 않아도, 설정의 '방' 탭 진입 시 공개 스터디방 목록이 메인 화면에 즉시 노출.
+  - 상단: `[새 방 만들기]`, `[초대 코드로 참여]` 액션 버튼.
+  - 중앙: 공개 스터디방 목록 헤더(`[새로고침]`, `[빠른 참여]`), 스크롤 가능한 실시간 공개 방 목록 (`방 이름`, `N명 공부 중`, `인원수/8`, `[참여]`).
+- **1인 1방 규칙 연동 및 방 전환**:
+  - 이미 방에 참여 중인 경우: 내 방 정보 하단에 `[다른 공개 방 둘러보기]` 버튼 제공.
+  - 다른 방의 `[참여]` 클릭 시 기존 방 퇴장 확인 다이얼로그(`QMessageBox.question`)를 거쳐 기존 방 안전 퇴장 후 새 방으로 자동 전환.
+- **간결한 표현 (설명적·감성적 텍스트 배제)**:
+  - 방 만들기 체크박스: `공개 방으로 설정 (다른 사용자가 검색하여 참여 가능)`에서 설명 문구를 떼어내고 `공개 방으로 설정`으로 간결화.
+  - 불필요한 하단 주석 안내문 제거.
+- **다국어 (i18n)**:
+  - 한국어(`ko`), 영어(`en`), 일본어(`ja`), 중국어 간체(`zh_CN`) 4개 국어 지원.
 
 ## 친구 요청 — 2026-10-05
 

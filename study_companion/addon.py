@@ -122,7 +122,11 @@ def _load_config(path: Path) -> tuple[dict, ConfigReadError | None]:
 
 
 def _not_group_member_error(error) -> bool:
-    return str(error).strip().casefold() == "not a member of this group"
+    try:
+        from .sync import is_kicked_error
+        return is_kicked_error(error)
+    except Exception:
+        return str(error).strip().casefold() == "not a member of this group"
 
 
 def _continue_after_review_batch_error(error) -> bool:
@@ -221,7 +225,7 @@ class Controller:
         if self.config_read_error is not None:
             self.record_status.set_error(LOCAL_READ, self.config_read_error)
         self.locale = data.get("language", "ko" if lang.current_lang.startswith("ko") else "en")
-        if self.locale not in ("ko", "en"):
+        if self.locale not in ("ko", "en", "ja", "zh_CN"):
             self.locale = "ko"
         self.ui_state = data.get("ui_state", {})
         self.client = SupabaseClient()
@@ -623,11 +627,15 @@ class Controller:
         self.review_upload_requested = True
         return True
 
-    def t(self, korean, english):
-        return english if self.locale == "en" else korean
+    def t(self, korean, english, ja="", zh_cn=""):
+        try:
+            from . import i18n
+            return i18n.tr(korean, english, ja, zh_cn, locale=self.locale)
+        except Exception:
+            return english if self.locale == "en" else korean
 
     def set_locale(self, locale):
-        self.locale = locale if locale in ("ko", "en") else "ko"
+        self.locale = locale if locale in ("ko", "en", "ja", "zh_CN") else "ko"
         self.save()
         self.refresh()
 
@@ -1420,11 +1428,15 @@ class Controller:
                 ) = future.result()
                 self.online["auth"] = updated_auth
                 if sync_error is not None and _not_group_member_error(sync_error):
-                    self.online["recovery_notice"] = self.t(
-                        "방 참여가 종료됐습니다.",
-                        "Your room membership has ended.",
-                    )
-                    self.leave_current_room_locally(auth["user_id"], group_id)
+                    try:
+                        from .sync import handle_kicked_state
+                        handle_kicked_state(self, auth["user_id"], group_id)
+                    except Exception:
+                        self.online["recovery_notice"] = self.t(
+                            "방에서 내보내졌습니다. 방 연결이 초기화되었습니다.",
+                            "You were removed from the room. Room connection has been reset.",
+                        )
+                        self.leave_current_room_locally(auth["user_id"], group_id)
                     return
                 for batch in review_acks:
                     self.review_history.acknowledge(auth["user_id"], group_id, batch)

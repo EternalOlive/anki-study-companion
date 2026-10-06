@@ -19,6 +19,7 @@ from aqt.qt import (
     QDialogButtonBox,
     QDateTime,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -36,6 +37,7 @@ from aqt.qt import (
     QWidget,
 )
 
+from . import i18n
 from .nicknames import canonical_nickname
 from .online import SupabaseError
 from .study_day import DAY_START_HOUR, DEFAULT_TIME_ZONE, room_time_zone
@@ -160,8 +162,8 @@ class SettingsDialog(QDialog):
         self.refresh_timer.start()
         self.show_home()
 
-    def _t(self, korean, english):
-        return english if self._locale_at_open == "en" else korean
+    def _t(self, korean, english, ja="", zh_cn=""):
+        return i18n.tr(korean, english, ja, zh_cn, locale=self._locale_at_open)
 
     def _heading(self, text):
         label = QLabel(text, self)
@@ -255,8 +257,42 @@ class SettingsDialog(QDialog):
         members_refresh_row = QHBoxLayout()
         members_refresh_row.addStretch(1)
         members_refresh_row.addWidget(self.members_refresh)
-        members_section_layout.addLayout(members_refresh_row)
         room_tab_layout.addWidget(self.members_section)
+
+        self.public_section, public_section_layout = self._section(
+            self.room_tab_content, self._t("공개 스터디방", "Public Study Rooms")
+        )
+        self.public_section.setObjectName("publicRoomsSection")
+
+        home_public_header = QHBoxLayout()
+        self.home_refresh_public_button = QPushButton(
+            self._t("새로고침", "Refresh"), self.public_section
+        )
+        self.home_refresh_public_button.clicked.connect(self.load_public_rooms)
+        self.home_quick_join_button = QPushButton(
+            self._t("빠른 참여", "Quick Join"), self.public_section
+        )
+        self.home_quick_join_button.clicked.connect(self.quick_join_public_room)
+        home_public_header.addStretch(1)
+        home_public_header.addWidget(self.home_refresh_public_button)
+        home_public_header.addWidget(self.home_quick_join_button)
+        public_section_layout.addLayout(home_public_header)
+
+        self.home_public_error = self._error_label()
+        public_section_layout.addWidget(self.home_public_error)
+
+        self.home_public_scroll = QScrollArea(self.public_section)
+        self.home_public_scroll.setWidgetResizable(True)
+        self.home_public_scroll.setMinimumHeight(140)
+        self.home_public_body = QWidget(self.home_public_scroll)
+        self.home_public_layout = QVBoxLayout(self.home_public_body)
+        self.home_public_layout.setContentsMargins(4, 4, 4, 4)
+        self.home_public_layout.setSpacing(6)
+        self.home_public_scroll.setWidget(self.home_public_body)
+        public_section_layout.addWidget(self.home_public_scroll)
+
+        room_tab_layout.addWidget(self.public_section)
+
         room_tab_layout.addStretch(1)
 
         self.record_status_toggle = QToolButton(self.settings_tab_content)
@@ -380,6 +416,8 @@ class SettingsDialog(QDialog):
         self.language.setObjectName("language")
         self.language.addItem("한국어", "ko")
         self.language.addItem("English", "en")
+        self.language.addItem("日本語", "ja")
+        self.language.addItem("简体中文", "zh_CN")
         language_form.addRow(self._t("언어", "Language"), self.language)
         environment_layout.addLayout(language_form)
         settings_tab_layout.addWidget(environment)
@@ -499,6 +537,17 @@ class SettingsDialog(QDialog):
             )
         )
         form.addRow(self._t("시간대", "Time zone"), self.room_time_zone)
+        self.room_is_public = QCheckBox(
+            self._t(
+                "공개 방으로 설정",
+                "Make room public",
+                ja="公開ルームに設定",
+                zh_cn="设为公开房间",
+            ),
+            page,
+        )
+        self.room_is_public.setChecked(True)
+        form.addRow(self._t("공개 여부", "Public"), self.room_is_public)
         layout.addLayout(form)
         self.create_error = self._error_label()
         layout.addWidget(self.create_error)
@@ -521,9 +570,40 @@ class SettingsDialog(QDialog):
         layout.addLayout(form)
         self.join_error = self._error_label()
         layout.addWidget(self.join_error)
+
+        line = QFrame(page)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        layout.addWidget(line)
+
+        public_header = QHBoxLayout()
+        public_title = QLabel(self._t("공개 스터디방", "Public Study Rooms"), page)
+        public_font = public_title.font()
+        public_font.setBold(True)
+        public_title.setFont(public_font)
+        public_header.addWidget(public_title)
+        public_header.addStretch(1)
+        self.refresh_public_button = QPushButton(self._t("새로고침", "Refresh"), page)
+        self.refresh_public_button.clicked.connect(self.load_public_rooms)
+        public_header.addWidget(self.refresh_public_button)
+        self.quick_join_button = QPushButton(self._t("빠른 참여", "Quick Join"), page)
+        self.quick_join_button.clicked.connect(self.quick_join_public_room)
+        public_header.addWidget(self.quick_join_button)
+        layout.addLayout(public_header)
+
+        self.public_rooms_scroll = QScrollArea(page)
+        self.public_rooms_scroll.setWidgetResizable(True)
+        self.public_rooms_scroll.setMinimumHeight(130)
+        self.public_rooms_body = QWidget(self.public_rooms_scroll)
+        self.public_rooms_layout = QVBoxLayout(self.public_rooms_body)
+        self.public_rooms_layout.setContentsMargins(4, 4, 4, 4)
+        self.public_rooms_layout.setSpacing(6)
+        self.public_rooms_scroll.setWidget(self.public_rooms_body)
+        layout.addWidget(self.public_rooms_scroll)
+
         layout.addStretch(1)
         row, self.join_back, self.join_submit = self._back_row(
-            page, self._t("참여", "Join"), self.join_group
+            page, self._t("코드로 참여", "Join with code"), self.join_group
         )
         layout.addLayout(row)
         return page
@@ -590,6 +670,7 @@ class SettingsDialog(QDialog):
         self.new_password = QLineEdit(page)
         self.new_password.setObjectName("newPassword")
         self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_password.setPlaceholderText(self._t("비밀번호 (10자 이상)", "Password (10+ characters)"))
         form.addRow(self._t("비밀번호", "Password"), self.new_password)
         layout.addLayout(form)
         self.finish_email_button = QPushButton(
@@ -632,12 +713,15 @@ class SettingsDialog(QDialog):
             self._t("기존 이메일 계정", "Legacy email account"), page
         )
         self.email_login_compat.toggled.connect(self._update_login_mode)
+        self.email_login_compat.setVisible(False)
         layout.addWidget(self.email_login_compat)
         self.login_email = QLineEdit(page)
         self.login_email.setObjectName("loginEmail")
+        self.login_email.setPlaceholderText(self._t("아이디", "Username"))
         self.login_password = QLineEdit(page)
         self.login_password.setObjectName("loginPassword")
         self.login_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.login_password.setPlaceholderText(self._t("비밀번호 (10자 이상)", "Password (10+ characters)"))
         self.login_identity_label = QLabel(self._t("아이디", "Username"), page)
         form.addRow(self.login_identity_label, self.login_email)
         form.addRow(self._t("비밀번호", "Password"), self.login_password)
@@ -796,7 +880,37 @@ class SettingsDialog(QDialog):
             copy_row.addStretch(1)
             self.room_layout.addLayout(copy_row)
             user_id = (self.controller.online.get("auth") or {}).get("user_id")
-            if user_id and group.get("owner_id") == user_id:
+            is_owner = bool(user_id and group.get("owner_id") == user_id)
+
+            tz_row = QHBoxLayout()
+            tz_label = QLabel(self._t("방 시간대", "Room time zone"), self)
+            self.room_tz_dropdown = QComboBox(self)
+            self.room_tz_dropdown.setObjectName("roomTimeZoneSelect")
+            self.room_tz_dropdown.addItems(_available_time_zones())
+            tz_idx = self.room_tz_dropdown.findText(time_zone)
+            if tz_idx >= 0:
+                self.room_tz_dropdown.setCurrentIndex(tz_idx)
+            self.room_tz_dropdown.setEnabled(is_owner)
+            tz_row.addWidget(tz_label)
+            tz_row.addWidget(self.room_tz_dropdown)
+            if is_owner:
+                self.change_tz_button = QPushButton(
+                    self._t("시간대 변경", "Change time zone"), self
+                )
+                self.change_tz_button.setObjectName("changeTimeZone")
+                self.change_tz_button.clicked.connect(self.change_room_timezone)
+                tz_row.addWidget(self.change_tz_button)
+            else:
+                self.room_tz_dropdown.setToolTip(
+                    self._t(
+                        "방장만 시간대를 변경할 수 있습니다.",
+                        "Only the room owner can change the time zone.",
+                    )
+                )
+            tz_row.addStretch(1)
+            self.room_layout.addLayout(tz_row)
+
+            if is_owner:
                 owner_actions = QHBoxLayout()
                 self.rotate_invite_button = QPushButton(
                     self._t("초대 코드 변경", "Change invite code"), self
@@ -806,13 +920,31 @@ class SettingsDialog(QDialog):
                 owner_actions.addStretch(1)
                 self.room_layout.addLayout(owner_actions)
             leave_row = QHBoxLayout()
+            self.browse_public_button = QPushButton(
+                self._t(
+                    "다른 공개 방 둘러보기",
+                    "Browse other rooms",
+                    ja="他の公開ルームを見る",
+                    zh_cn="查看其他公开房间",
+                ),
+                self,
+            )
+            self.browse_public_button.clicked.connect(self._toggle_browse_public_rooms)
+            leave_row.addWidget(self.browse_public_button)
             leave_row.addStretch(1)
             leave = QPushButton(self._t("방 나가기", "Leave room"), self)
             leave.clicked.connect(self.show_leave)
             leave_row.addWidget(leave)
             self.room_layout.addLayout(leave_row)
             self.members_section.setVisible(True)
+            if hasattr(self, "public_section"):
+                self.public_section.setVisible(False)
             return
+
+        if hasattr(self, "members_section"):
+            self.members_section.setVisible(False)
+        if hasattr(self, "public_section"):
+            self.public_section.setVisible(True)
 
         if not self.controller._access_token():
             self.room_layout.addWidget(
@@ -832,14 +964,19 @@ class SettingsDialog(QDialog):
             return
 
         row = QHBoxLayout()
-        join = QPushButton(self._t("초대 코드로 참여", "Join with a code"), self)
         create = QPushButton(self._t("새 방 만들기", "Create a room"), self)
-        join.clicked.connect(self.show_join)
+        join = QPushButton(self._t("초대 코드로 참여", "Join with a code"), self)
         create.clicked.connect(self.show_create)
-        row.addWidget(join)
+        join.clicked.connect(self.show_join)
         row.addWidget(create)
+        row.addWidget(join)
         row.addStretch(1)
         self.room_layout.addLayout(row)
+
+        if not hasattr(self.controller, "pending") and self.controller._access_token():
+            self.load_public_rooms()
+        elif hasattr(self, "home_public_layout") and hasattr(self, "home_public_body"):
+            self._render_placeholder(self.home_public_layout, self.home_public_body)
 
     def _refresh_account_page(self):
         kind = self.controller.online.get("account_kind")
@@ -1144,6 +1281,25 @@ class SettingsDialog(QDialog):
             for row in members
             if row.get("user_id")
         }
+        if current_user == owner_id:
+            owner_toolbar = QHBoxLayout()
+            self.cleanup_inactive_button = QPushButton(
+                self._t("비활성 정리", "Clean up inactive"), self.members_section
+            )
+            self.cleanup_inactive_button.setObjectName("cleanupInactive")
+            self.cleanup_inactive_button.setToolTip(
+                self._t(
+                    "14일 이상 미동기화된 비방장 멤버를 정리합니다.",
+                    "Clean up non-owner members inactive for 14+ days.",
+                )
+            )
+            self.cleanup_inactive_button.clicked.connect(
+                lambda _checked=False: self.cleanup_inactive(group_id, owner_id)
+            )
+            owner_toolbar.addStretch(1)
+            owner_toolbar.addWidget(self.cleanup_inactive_button)
+            self.members_list_layout.addLayout(owner_toolbar)
+
         if members:
             for member in members:
                 target_user = str(member.get("user_id"))
@@ -1159,6 +1315,26 @@ class SettingsDialog(QDialog):
                 row.addWidget(label)
                 row.addStretch(1)
                 if current_user == owner_id and target_user != owner_id:
+                    transfer = QPushButton(
+                        self._t("방장 위임", "Transfer owner"), self.members_section
+                    )
+                    transfer.setObjectName("transferOwner")
+                    transfer.clicked.connect(
+                        lambda _checked=False, user=target_user, member_name=name:
+                        self.transfer_ownership(group_id, owner_id, user, member_name)
+                    )
+                    row.addWidget(transfer)
+
+                    kick = QPushButton(
+                        self._t("강퇴", "Kick"), self.members_section
+                    )
+                    kick.setObjectName("kickMember")
+                    kick.clicked.connect(
+                        lambda _checked=False, user=target_user, member_name=name:
+                        self.kick_member(group_id, owner_id, user, member_name)
+                    )
+                    row.addWidget(kick)
+
                     remove = QPushButton(
                         self._t("내보내기", "Remove"), self.members_section
                     )
@@ -1257,6 +1433,186 @@ class SettingsDialog(QDialog):
             on_error=self._remote_error(
                 self.members_error,
                 self._t("멤버 설정을 바꾸지 못했습니다.", "Could not update the member."),
+            ),
+        )
+
+    def change_room_timezone(self):
+        group = self.controller.online.get("group") or {}
+        group_id = str(group.get("id") or "")
+        new_tz = self.room_tz_dropdown.currentText().strip()
+        if not group_id or not new_tz or new_tz == group.get("time_zone"):
+            return
+        if not self._begin_remote(self.members_error):
+            return
+
+        def operation(token):
+            self.controller.client.update_room_timezone(token, group_id, new_tz)
+            return new_tz
+
+        def success(updated_tz):
+            self._finish_remote()
+            if not self._valid():
+                return
+            group["time_zone"] = updated_tz
+            _apply_group_time_zone(self.controller, group)
+            self.refresh_from_controller()
+
+        controls = [self.room_tz_dropdown]
+        if hasattr(self, "change_tz_button") and self.change_tz_button:
+            controls.append(self.change_tz_button)
+        self.controller._run_authenticated_action(
+            controls,
+            operation,
+            success,
+            self._t("시간대를 변경하지 못했습니다.", "Could not change room time zone."),
+            on_error=self._remote_error(
+                self.members_error,
+                self._t("시간대를 변경하지 못했습니다.", "Could not change room time zone."),
+            ),
+        )
+
+    def transfer_ownership(self, group_id, owner_id, target_user, name):
+        if not self._same_owner_context(group_id, owner_id):
+            self.show_home()
+            return
+        answer = QMessageBox.question(
+            self,
+            self._t("방장 위임", "Transfer ownership"),
+            self._t(
+                f"'{name}' 님에게 방장 권한을 위임하시겠습니까?",
+                f"Transfer room ownership to '{name}'?",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self._begin_remote(self.members_error):
+            return
+
+        def operation(token):
+            self.controller.client.transfer_room_ownership(token, group_id, target_user)
+            return target_user
+
+        def success(new_owner):
+            self._finish_remote()
+            if not self._valid():
+                return
+            group = self.controller.online.get("group") or {}
+            group["owner_id"] = new_owner
+            self.refresh_from_controller()
+            self.load_members()
+
+        controls = self.members_section.findChildren(QPushButton)
+        self.controller._run_authenticated_action(
+            controls,
+            operation,
+            success,
+            self._t("방장 권한을 위임하지 못했습니다.", "Could not transfer ownership."),
+            on_error=self._remote_error(
+                self.members_error,
+                self._t("방장 권한을 위임하지 못했습니다.", "Could not transfer ownership."),
+            ),
+        )
+
+    def kick_member(self, group_id, owner_id, target_user, name):
+        if not self._same_owner_context(group_id, owner_id):
+            self.show_home()
+            return
+        answer = QMessageBox.question(
+            self,
+            self._t("멤버 내보내기", "Kick member"),
+            self._t(
+                f"'{name}' 님을 방에서 내보내시겠습니까?",
+                f"Remove '{name}' from the room?",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self._begin_remote(self.members_error):
+            return
+
+        def operation(token):
+            self.controller.client.kick_room_member(token, group_id, target_user)
+            return (
+                self.controller.client.list_group_members(token, group_id),
+                self.controller.client.list_group_bans(token, group_id),
+            )
+
+        def success(value):
+            self._finish_remote()
+            if not self._valid() or not self._same_owner_context(group_id, owner_id):
+                return
+            members, bans = value
+            self.controller.online.pop("members", None)
+            self.controller.sync_async(force=True)
+            self._render_members(group_id, owner_id, owner_id, members, bans)
+
+        controls = self.members_section.findChildren(QPushButton)
+        self.controller._run_authenticated_action(
+            controls,
+            operation,
+            success,
+            self._t("멤버를 내보내지 못했습니다.", "Could not kick member."),
+            on_error=self._remote_error(
+                self.members_error,
+                self._t("멤버를 내보내지 못했습니다.", "Could not kick member."),
+            ),
+        )
+
+    def cleanup_inactive(self, group_id, owner_id):
+        if not self._same_owner_context(group_id, owner_id):
+            self.show_home()
+            return
+        answer = QMessageBox.question(
+            self,
+            self._t("비활성 멤버 정리", "Clean up inactive members"),
+            self._t(
+                "14일 이상 미동기화된 멤버를 정리하시겠습니까?",
+                "Clean up members inactive for 14 or more days?",
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if not self._begin_remote(self.members_error):
+            return
+
+        def operation(token):
+            count = self.controller.client.cleanup_inactive_members(token, group_id, 14)
+            members = self.controller.client.list_group_members(token, group_id)
+            bans = self.controller.client.list_group_bans(token, group_id)
+            return count, members, bans
+
+        def success(value):
+            self._finish_remote()
+            if not self._valid() or not self._same_owner_context(group_id, owner_id):
+                return
+            count, members, bans = value
+            self.controller.online.pop("members", None)
+            self.controller.sync_async(force=True)
+            self._render_members(group_id, owner_id, owner_id, members, bans)
+            QMessageBox.information(
+                self,
+                self._t("정리 완료", "Cleanup complete"),
+                self._t(
+                    f"{count}명의 비활성 멤버를 정리했습니다.",
+                    f"Cleaned up {count} inactive member(s).",
+                ),
+            )
+
+        controls = self.members_section.findChildren(QPushButton)
+        self.controller._run_authenticated_action(
+            controls,
+            operation,
+            success,
+            self._t("비활성 멤버를 정리하지 못했습니다.", "Could not clean up inactive members."),
+            on_error=self._remote_error(
+                self.members_error,
+                self._t("비활성 멤버를 정리하지 못했습니다.", "Could not clean up inactive members."),
             ),
         )
 
@@ -1595,9 +1951,10 @@ class SettingsDialog(QDialog):
             if self._valid():
                 self.show_home()
 
+        is_public = bool(self.room_is_public.isChecked()) if hasattr(self, "room_is_public") else False
         self.controller._run_authenticated_action(
             [self.create_submit],
-            lambda token: self.controller.client.create_group(token, name, time_zone),
+            lambda token: self.controller.client.create_group(token, name, time_zone, is_public=is_public),
             success,
             self._t("방을 만들지 못했습니다.", "Could not create the room."),
             on_error=self._remote_error(
@@ -1621,18 +1978,69 @@ class SettingsDialog(QDialog):
             )
             return
         self.invite_code.setText(code)
-        if not self._begin_remote(self.join_error):
+        self.join_by_code(code)
+
+    def _toggle_browse_public_rooms(self):
+        visible = not self.public_section.isVisible()
+        self.public_section.setVisible(visible)
+        if visible:
+            self.load_public_rooms()
+
+    def _render_placeholder(self, layout, body_widget):
+        _clear_layout(layout)
+        placeholder = QLabel(
+            self._t(
+                "새로고침을 눌러 공개 방을 확인하세요.",
+                "Click Refresh to load public rooms.",
+                ja="更新を押して公開ルームを確認してください。",
+                zh_cn="点击刷新查看公开房间。",
+            ),
+            body_widget,
+        )
+        placeholder.setStyleSheet("color: gray;")
+        layout.addWidget(placeholder)
+
+    def join_by_code(self, code: str):
+        current_group = self.controller.online.get("group") or {}
+        if current_group.get("id"):
+            room_name = current_group.get("name") or self._t("현재 방", "Current room")
+            answer = QMessageBox.question(
+                self,
+                self._t("방 이동 확인", "Switch Room Confirmation"),
+                self._t(
+                    f"새로운 방에 참여하면 현재 방({room_name})에서 나가게 됩니다.\n계속하시겠습니까?",
+                    f"Joining a new room will leave your current room ({room_name}).\nDo you want to continue?",
+                    ja=f"新しいルームに参加すると現在のルーム（{room_name}）から退出します。\nよろしいですか？",
+                    zh_cn=f"加入新房间将会退出当前房间（{room_name}）。\n是否继续？",
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        err_target = (
+            self.home_public_error
+            if hasattr(self, "public_section") and self.public_section.isVisible()
+            else self.join_error
+        )
+        if not self._begin_remote(err_target):
             return
         user_id = (self.controller.online.get("auth") or {}).get("user_id")
         if not user_id:
             self._finish_remote()
             self._set_message(
-                self.join_error,
+                err_target,
                 self._t("계정 준비가 필요합니다.", "The account is not ready yet."),
             )
             return
 
         def operation(token):
+            if current_group.get("id"):
+                try:
+                    self.controller.client.leave_group(token, current_group["id"])
+                except Exception:
+                    pass
             group_id = self.controller.client.join_group(token, code)
             groups = self.controller.client.list_groups(token, user_id)
             return group_id, groups
@@ -1655,14 +2063,156 @@ class SettingsDialog(QDialog):
             if self._valid():
                 self.show_home()
 
+        controls = [
+            getattr(self, "join_submit", None),
+            getattr(self, "quick_join_button", None),
+            getattr(self, "home_quick_join_button", None),
+        ]
         self.controller._run_authenticated_action(
-            [self.join_submit],
+            [c for c in controls if c],
             operation,
             success,
             self._t("방에 참여하지 못했습니다.", "Could not join the room."),
             on_error=self._remote_error(
-                self.join_error,
+                err_target,
                 self._t("방에 참여하지 못했습니다.", "Could not join the room."),
+            ),
+        )
+
+    def load_public_rooms(self):
+        self._set_message(self.join_error, "")
+        if hasattr(self, "home_public_error"):
+            self._set_message(self.home_public_error, "")
+
+        layouts_to_update = []
+        if hasattr(self, "public_rooms_layout") and hasattr(self, "public_rooms_body"):
+            layouts_to_update.append((self.public_rooms_layout, self.public_rooms_body))
+        if hasattr(self, "home_public_layout") and hasattr(self, "home_public_body"):
+            layouts_to_update.append((self.home_public_layout, self.home_public_body))
+
+        if not layouts_to_update:
+            return
+
+        for layout, body in layouts_to_update:
+            _clear_layout(layout)
+            loading_label = QLabel(
+                self._t("공개 방 목록을 불러오는 중…", "Loading public rooms…"),
+                body,
+            )
+            layout.addWidget(loading_label)
+
+        def operation(token):
+            tz = _time_zone_text(QTimeZone.systemTimeZoneId()) or "Asia/Seoul"
+            return self.controller.client.list_public_study_groups(token, tz)
+
+        def success(rooms):
+            if not self._valid():
+                return
+            self._render_public_rooms(rooms or [])
+
+        err_target = (
+            self.home_public_error
+            if hasattr(self, "public_section") and self.public_section.isVisible()
+            else self.join_error
+        )
+        controls = [
+            getattr(self, "refresh_public_button", None),
+            getattr(self, "home_refresh_public_button", None),
+        ]
+        self.controller._run_authenticated_action(
+            [c for c in controls if c],
+            operation,
+            success,
+            self._t("공개 방 목록을 불러오지 못했습니다.", "Could not load public rooms."),
+            on_error=self._remote_error(
+                err_target,
+                self._t("공개 방 목록을 불러오지 못했습니다.", "Could not load public rooms."),
+            ),
+        )
+
+    def _render_public_rooms(self, rooms: list[dict]):
+        if hasattr(self, "public_rooms_layout") and hasattr(self, "public_rooms_body"):
+            self._populate_rooms_into(self.public_rooms_layout, self.public_rooms_body, rooms)
+        if hasattr(self, "home_public_layout") and hasattr(self, "home_public_body"):
+            self._populate_rooms_into(self.home_public_layout, self.home_public_body, rooms)
+
+    def _populate_rooms_into(self, layout, body_widget, rooms: list[dict]):
+        _clear_layout(layout)
+        if not rooms:
+            empty = QLabel(self._t("참여 가능한 공개 방이 없습니다.", "No public rooms available."), body_widget)
+            empty.setStyleSheet("color: gray;")
+            layout.addWidget(empty)
+            return
+
+        for room in rooms:
+            row_widget = QWidget(body_widget)
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(8)
+
+            name = str(room.get("name") or "")
+            members = int(room.get("member_count") or 0)
+            studying = int(room.get("studying_count") or 0)
+            code = str(room.get("invite_code") or "")
+            tz = str(room.get("time_zone") or "")
+
+            title_label = QLabel(name, row_widget)
+            title_font = title_label.font()
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            row_layout.addWidget(title_label, 1)
+
+            status_text = self._t(f"{studying}명 공부 중", f"{studying} studying") if studying > 0 else "—"
+            status_label = QLabel(status_text, row_widget)
+            status_label.setStyleSheet("color: #32734e;" if studying > 0 else "color: gray;")
+            row_layout.addWidget(status_label)
+
+            count_label = QLabel(f"{members}/8", row_widget)
+            count_label.setToolTip(tz)
+            row_layout.addWidget(count_label)
+
+            btn = QPushButton(self._t("참여", "Join"), row_widget)
+            btn.clicked.connect(lambda _checked=False, c=code: self.join_by_code(c))
+            row_layout.addWidget(btn)
+
+            layout.addWidget(row_widget)
+
+    def quick_join_public_room(self):
+        err_target = (
+            self.home_public_error
+            if hasattr(self, "public_section") and self.public_section.isVisible()
+            else self.join_error
+        )
+        self._set_message(err_target, "")
+        if not self._begin_remote(err_target):
+            return
+
+        def operation(token):
+            tz = _time_zone_text(QTimeZone.systemTimeZoneId()) or "Asia/Seoul"
+            rooms = self.controller.client.list_public_study_groups(token, tz)
+            if not rooms:
+                raise SupabaseError(self._t("참여 가능한 공개 방이 없습니다.", "No public rooms available to join."))
+            code = str(rooms[0].get("invite_code") or "")
+            if not code:
+                raise SupabaseError(self._t("방 코드를 확인할 수 없습니다.", "Invalid room code."))
+            return code
+
+        def success(code):
+            self._finish_remote()
+            self.join_by_code(code)
+
+        controls = [
+            getattr(self, "quick_join_button", None),
+            getattr(self, "home_quick_join_button", None),
+        ]
+        self.controller._run_authenticated_action(
+            [c for c in controls if c],
+            operation,
+            success,
+            self._t("빠른 참여에 실패했습니다.", "Quick join failed."),
+            on_error=self._remote_error(
+                err_target,
+                self._t("빠른 참여에 실패했습니다.", "Quick join failed."),
             ),
         )
 

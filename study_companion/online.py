@@ -357,12 +357,24 @@ class SupabaseClient:
         )
         return self._first(result)
 
-    def create_group(self, token: str, name: str, timezone_name: str = "Asia/Seoul") -> dict[str, Any] | None:
+    def create_group(
+        self,
+        token: str,
+        name: str,
+        timezone_name: str = "Asia/Seoul",
+        is_public: bool = False,
+    ) -> dict[str, Any] | None:
+        body: dict[str, Any] = {
+            "group_name": name,
+            "room_timezone": timezone_name,
+        }
+        if is_public:
+            body["room_is_public"] = True
         result = self._request(
             "POST",
             "/rest/v1/rpc/create_study_group",
             token=token,
-            body={"group_name": name, "room_timezone": timezone_name},
+            body=body,
         )
         created = self._first(result)
         if not created:
@@ -373,6 +385,7 @@ class SupabaseClient:
             "invite_code": created.get("invite_code"),
             "time_zone": created.get("time_zone") or timezone_name,
             "day_start_hour": 4,
+            "is_public": created.get("is_public", is_public),
         }
 
     def join_group(self, token: str, code: str) -> Any:
@@ -491,6 +504,75 @@ class SupabaseClient:
                 "blocked": bool(blocked),
             },
         )
+
+    def update_room_timezone(
+        self, token: str, group_id: str, timezone_name: str
+    ) -> Any:
+        return self._request(
+            "POST",
+            "/rest/v1/rpc/update_room_timezone",
+            token=token,
+            body={
+                "target_group": group_id,
+                "new_timezone": str(timezone_name).strip(),
+            },
+        )
+
+    def transfer_room_ownership(
+        self, token: str, group_id: str, new_owner_id: str
+    ) -> Any:
+        return self._request(
+            "POST",
+            "/rest/v1/rpc/transfer_room_ownership",
+            token=token,
+            body={
+                "target_group": group_id,
+                "new_owner_id": str(new_owner_id).strip(),
+            },
+        )
+
+    def kick_room_member(
+        self, token: str, group_id: str, target_user: str
+    ) -> Any:
+        return self._request(
+            "POST",
+            "/rest/v1/rpc/kick_room_member",
+            token=token,
+            body={
+                "target_group": group_id,
+                "target_user": str(target_user).strip(),
+            },
+        )
+
+    def cleanup_inactive_members(
+        self, token: str, group_id: str, days: int = 14
+    ) -> int:
+        result = self._request(
+            "POST",
+            "/rest/v1/rpc/cleanup_inactive_members",
+            token=token,
+            body={
+                "target_group": group_id,
+                "days_inactive": int(days),
+            },
+        )
+        if isinstance(result, int):
+            return result
+        try:
+            return int(result)
+        except (TypeError, ValueError):
+            return 0
+
+    def list_public_study_groups(
+        self, token: str, timezone_name: str = "Asia/Seoul"
+    ) -> list[dict[str, Any]]:
+        result = self._request(
+            "POST",
+            "/rest/v1/rpc/list_public_study_groups",
+            token=token,
+            body={"user_timezone": str(timezone_name).strip()},
+        )
+        return result if isinstance(result, list) else []
 
     def list_groups(self, token: str, user_id: str) -> list[dict[str, Any]]:
         rows = self._request(
