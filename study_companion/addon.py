@@ -40,6 +40,7 @@ from .nicknames import (
     sanitize_display_name,
     validate_display_name,
 )
+from .outbox import SyncOutbox
 from .record_status import (
     LOCAL_READ,
     LOCAL_SAVE,
