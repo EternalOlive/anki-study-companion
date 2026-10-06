@@ -876,7 +876,7 @@ class WeeklyLineChart(QWidget):
             painter.drawRect(0, 0, max(0, self.width() - 1), max(0, self.height() - 1))
 
 
-class MemberRow(QWidget):
+class MemberRow(QFrame):
     """A stable, expandable friend row.
 
     Rows are updated in place so a refresh never changes keyboard focus or
@@ -889,22 +889,33 @@ class MemberRow(QWidget):
         self.member = member
         self.expanded = False
 
+        self.setObjectName("member_row")
+        self.setStyleSheet(
+            "QFrame#member_row {"
+            "  background-color: transparent;"
+            "  border: 1px solid palette(midlight);"
+            "  border-radius: 8px;"
+            "}"
+            "QFrame#member_row:hover {"
+            "  border-color: palette(highlight);"
+            "}"
+        )
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 5, 0, 5)
-        layout.setSpacing(5)
+        layout.setContentsMargins(8, 7, 8, 7)
+        layout.setSpacing(4)
 
         self.identity = QPushButton(self)
         self.identity.setObjectName("member_summary")
         self.identity.setFlat(True)
         self.identity.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.identity.setStyleSheet(
-            "QPushButton#member_summary { background: transparent; border: 1px solid transparent; border-radius: 4px; }"
-            "QPushButton#member_summary[expandable=\"true\"]:hover { background: palette(midlight); }"
-            "QPushButton#member_summary:focus { border-color: palette(highlight); }"
+            "QPushButton#member_summary { background: transparent; border: none; padding: 0px; text-align: left; }"
+            "QPushButton#member_summary:focus { outline: none; }"
         )
         self.identity.clicked.connect(self.toggle_expanded)
         self.summary = QGridLayout(self.identity)
-        self.summary.setContentsMargins(3, 3, 3, 3)
+        self.summary.setContentsMargins(2, 2, 2, 2)
         self.summary.setHorizontalSpacing(8)
         self.summary.setVerticalSpacing(4)
 
@@ -965,7 +976,22 @@ class MemberRow(QWidget):
         self.poke.setObjectName("member_poke")
         self.poke.setAutoRaise(True)
         _set_font(self.poke, scale=0.85)
-        self.poke.setStyleSheet("QToolButton#member_poke { padding: 0px 2px; }")
+        self.poke.setStyleSheet(
+            "QToolButton#member_poke {"
+            "  background: transparent;"
+            "  border: 1px solid palette(midlight);"
+            "  border-radius: 4px;"
+            "  padding: 1px 6px;"
+            "  color: palette(window-text);"
+            "}"
+            "QToolButton#member_poke:hover {"
+            "  background: palette(midlight);"
+            "}"
+            "QToolButton#member_poke:disabled {"
+            "  border-color: transparent;"
+            "  color: palette(placeholder-text);"
+            "}"
+        )
         self.poke.setCursor(Qt.CursorShape.PointingHandCursor)
         self.poke.clicked.connect(lambda: self.panel.poke_member(self.member))
         self.poke.hide()
@@ -1019,7 +1045,8 @@ class MemberRow(QWidget):
         cooling = self.panel.poke_cooling(member)
         text = self.panel.tr("찌르기", "Poke")
         self.poke.setText(text)
-        self.poke.setFixedWidth(self.poke.fontMetrics().horizontalAdvance(text) + 8)
+        self.poke.setFixedWidth(self.poke.fontMetrics().horizontalAdvance(text) + 18)
+        self.poke.setFixedHeight(22)
         self.poke.setEnabled(not cooling)
         tip = (
             self.panel.tr(
@@ -1085,7 +1112,7 @@ class MemberRow(QWidget):
         status = self.panel.controller._current_member_status(member)
         name = self.panel.member_name(member)
         status_text = self.panel.status_text(status) if status in ("studying", "paused", "online") else ""
-        status_suffix = f"  ·  {status_text}" if status_text else ""
+        status_suffix = f"  ·  {status_text.replace(' ', chr(160))}" if status_text else ""
         self.identity_text.setText(
             f"{_allow_anywhere_wrap(name)}{status_suffix}  {'-' if self.expanded else '+'}"
         )
@@ -1229,52 +1256,65 @@ class StudyPanel(QWidget):
 
         outer.addWidget(self._separator())
 
+        self.own_card = QFrame(self)
+        self.own_card.setObjectName("own_card")
+        self.own_card.setStyleSheet(
+            "QFrame#own_card {"
+            "  background-color: transparent;"
+            "  border: 1px solid palette(midlight);"
+            "  border-radius: 8px;"
+            "}"
+        )
+        own_card_layout = QVBoxLayout(self.own_card)
+        own_card_layout.setContentsMargins(10, 8, 10, 8)
+        own_card_layout.setSpacing(6)
+
         own_header = QHBoxLayout()
-        self.own_title = QLabel(self)
+        self.own_title = QLabel(self.own_card)
         _set_font(self.own_title, bold=True)
         own_header.addWidget(self.own_title)
         own_header.addStretch()
-        self.own_dot = QLabel("●", self)
+        self.own_dot = QLabel("●", self.own_card)
         self.own_dot.setFixedWidth(10)
-        self.own_status = QLabel(self)
+        self.own_status = QLabel(self.own_card)
         own_header.addWidget(self.own_dot)
         own_header.addWidget(self.own_status)
-        outer.addLayout(own_header)
+        own_card_layout.addLayout(own_header)
 
         self.own_values = QGridLayout()
         self.own_values.setContentsMargins(0, 0, 0, 0)
         self.own_values.setHorizontalSpacing(12)
         self.own_values.setVerticalSpacing(2)
-        self.own_time = GoalMetric(lambda: self._open_goal_editor("time"), self)
+        self.own_time = GoalMetric(lambda: self._open_goal_editor("time"), self.own_card)
         _set_font(self.own_time, scale=1.75, bold=True)
-        self.own_answers = GoalMetric(lambda: self._open_goal_editor("answers"), self)
+        self.own_answers = GoalMetric(lambda: self._open_goal_editor("answers"), self.own_card)
         _set_font(self.own_answers, scale=1.35, bold=True)
-        self.time_caption = QLabel(self)
-        self.answer_caption = QLabel(self)
+        self.time_caption = QLabel(self.own_card)
+        self.answer_caption = QLabel(self.own_card)
         self.own_values.addWidget(self.own_time, 0, 0)
         self.own_values.addWidget(self.own_answers, 0, 1)
         self.own_values.addWidget(self.time_caption, 1, 0)
         self.own_values.addWidget(self.answer_caption, 1, 1)
         self.own_values.setColumnStretch(0, 1)
         self.own_values.setColumnStretch(1, 1)
-        outer.addLayout(self.own_values)
+        own_card_layout.addLayout(self.own_values)
         self._own_compact = False
 
-        self.own_activity_toggle = QPushButton(self)
+        self.own_activity_toggle = QPushButton(self.own_card)
         self.own_activity_toggle.setFlat(True)
         self.own_activity_toggle.setCheckable(True)
         self.own_activity_toggle.setStyleSheet(
             "QPushButton { text-align: left; padding: 4px 0; border: none; background: transparent; }"
         )
-        outer.addWidget(self.own_activity_toggle)
-        self.own_activity_timeline = ActivityTimeline(self, self)
+        own_card_layout.addWidget(self.own_activity_toggle)
+        self.own_activity_timeline = ActivityTimeline(self, self.own_card)
         self.own_activity_timeline.hide()
         self.own_activity_toggle.toggled.connect(self._toggle_own_activity)
-        outer.addWidget(self.own_activity_timeline)
-
-        outer.addWidget(self._separator())
+        own_card_layout.addWidget(self.own_activity_timeline)
+        outer.addWidget(self.own_card)
 
         self.room_activity = QWidget(self)
+        self.room_activity.setObjectName("room_activity_section")
         room_activity_layout = QVBoxLayout(self.room_activity)
         room_activity_layout.setContentsMargins(0, 0, 0, 4)
         room_activity_layout.setSpacing(3)
@@ -1336,7 +1376,7 @@ class StudyPanel(QWidget):
         self.member_body = QWidget(self)
         self.member_layout = QVBoxLayout(self.member_body)
         self.member_layout.setContentsMargins(0, 0, 0, 0)
-        self.member_layout.setSpacing(0)
+        self.member_layout.setSpacing(6)
         self.member_layout.addStretch()
         outer.addWidget(self.member_body)
 

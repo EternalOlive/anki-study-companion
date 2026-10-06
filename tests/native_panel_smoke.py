@@ -227,8 +227,8 @@ def main() -> int:
     app.setFont(QtGui.QFont(family, 9))
 
     current = datetime.now(timezone).replace(microsecond=0)
-    today = current.date().isoformat()
-    yesterday = (current.date() - timedelta(days=1)).isoformat()
+    today = _room_day(current).isoformat()
+    yesterday = (_room_day(current) - timedelta(days=1)).isoformat()
     tracker = StudyTracker(
         records={today: {"seconds": 24 * 60 + 10, "answers": 48}},
         deck_records={
