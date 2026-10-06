@@ -418,6 +418,22 @@ class Controller:
             if apply_presence_to_members(members, presences, current_iso):
                 self.refresh()
 
+    def _current_presence_meta(self, current=None):
+        current = current or now()
+        time_zone = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
+        status = presence_status(
+            getattr(self.tracker, "status", "offline"),
+            getattr(self.tracker, "last_input_at", None),
+            current,
+        )
+        deck_name = shareable_deck_name(
+            bool(self.online.get("share_deck_name", True)),
+            getattr(self.tracker, "current_deck_name", None),
+            getattr(self.tracker, "current_deck_day", None),
+            study_day(current, time_zone).isoformat(),
+        )
+        return status, deck_name
+
     def _sync_realtime_connection(self):
         realtime = getattr(self, "realtime", None)
         if realtime is None or not realtime.is_available():
@@ -428,14 +444,7 @@ class Controller:
         user_id = auth.get("user_id")
         if group_id and user_id:
             realtime.join_room(group_id, user_id)
-            current = now()
-            status = presence_status(self.tracker.status, self.tracker.last_input_at, current)
-            deck_name = shareable_deck_name(
-                self.online.get("share_deck_name", True),
-                self.tracker.current_deck_name,
-                self.tracker.deck_opened_day,
-                study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
-            )
+            status, deck_name = self._current_presence_meta()
             display_name = sanitize_display_name(
                 self.online.get("display_name"),
                 user_id,
@@ -741,14 +750,7 @@ class Controller:
 
             realtime = getattr(self, "realtime", None)
             if realtime is not None and realtime.is_available():
-                current = now()
-                status = presence_status(self.tracker.status, self.tracker.last_input_at, current)
-                deck_name = shareable_deck_name(
-                    self.online.get("share_deck_name", True),
-                    self.tracker.current_deck_name,
-                    self.tracker.deck_opened_day,
-                    study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
-                )
+                status, deck_name = self._current_presence_meta()
                 realtime.update_presence(
                     status=status,
                     current_deck_name=deck_name,
@@ -785,14 +787,7 @@ class Controller:
 
             realtime = getattr(self, "realtime", None)
             if realtime is not None and realtime.is_available():
-                current = now()
-                status = presence_status(self.tracker.status, self.tracker.last_input_at, current)
-                deck_name = shareable_deck_name(
-                    self.online.get("share_deck_name", True),
-                    self.tracker.current_deck_name,
-                    self.tracker.deck_opened_day,
-                    study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
-                )
+                status, deck_name = self._current_presence_meta()
                 realtime.update_presence(
                     status=status,
                     current_deck_name=deck_name,
