@@ -101,6 +101,44 @@ class NicknameTests(unittest.TestCase):
         # Fallback when no user_id given
         self.assertEqual("Guest", sanitize_display_name("bad bad bad", None))
 
+    def test_controller_set_and_reset_display_name(self):
+        import ast
+        from pathlib import Path
+        from types import SimpleNamespace
+        path = Path(__file__).parents[1] / "study_companion" / "addon.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        controller_node = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Controller"
+        )
+        controller_node.body = [
+            node for node in controller_node.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name in ("set_display_name", "reset_display_name", "_access_token")
+        ]
+        scope = {
+            "validate_display_name": validate_display_name,
+            "canonical_nickname": canonical_nickname,
+            "threading": __import__("threading"),
+            "time": __import__("time"),
+            "getattr": getattr,
+        }
+        exec(compile(ast.Module(body=[controller_node], type_ignores=[]), str(path), "exec"), scope)
+        ControllerClass = scope["Controller"]
+        ctrl = ControllerClass()
+        ctrl.online = {"auth": {"user_id": "u-123", "access_token": "token-xyz"}}
+        ctrl.client = SimpleNamespace(upsert_profile=lambda *a, **kw: None)
+        ctrl.save = lambda: None
+        ctrl.refresh = lambda: None
+        ctrl.realtime = None
+
+        self.assertTrue(ctrl.set_display_name("goyori"))
+        self.assertEqual(ctrl.online["display_name"], "goyori")
+
+        ctrl.reset_display_name()
+        self.assertEqual(ctrl.online["display_name"], canonical_nickname("u-123"))
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -749,9 +749,10 @@ class Controller:
                 try:
                     self.client.upsert_profile(token, user_id, name)
                     self.online["synced_display_name"] = name
+                    self.save()
                 except Exception:
                     pass
-            self.executor.submit(_upload)
+            threading.Thread(target=_upload, daemon=True).start()
 
             realtime = getattr(self, "realtime", None)
             if realtime is not None and realtime.is_available():
@@ -786,9 +787,10 @@ class Controller:
                 try:
                     self.client.upsert_profile(token, user_id, default_name)
                     self.online["synced_display_name"] = default_name
+                    self.save()
                 except Exception:
                     pass
-            self.executor.submit(_upload)
+            threading.Thread(target=_upload, daemon=True).start()
 
             realtime = getattr(self, "realtime", None)
             if realtime is not None and realtime.is_available():
