@@ -48,6 +48,7 @@ from .ux_services import (
     validate_goal,
 )
 from .activity import weekly_activity
+from .room_activity import member_status, presence_status
 from .reviews import ReviewHistory
 from .study_day import (
     DEFAULT_TIME_ZONE,
@@ -441,7 +442,7 @@ class Controller:
             int(live_record.get("answers") or 0),
         )
         status = {"studying": self.t("공부 중", "Studying"), "paused": self.t("잠시 멈춤", "Paused"), "stopped": self.t("접속 중", "Online")}[
-            self.tracker.status
+            presence_status(self.tracker.status, self.tracker.last_input_at, current)
         ]
         time_goal = f"/{self.panel_body.format_clock(self.tracker.time_goal_minutes * 60)}" if self.tracker.time_goal_minutes else ""
         card_goal = f"/{self.tracker.card_goal}" if self.tracker.card_goal else ""
@@ -970,17 +971,7 @@ class Controller:
         mw.taskman.run_in_background(task, done)
 
     def _current_member_status(self, member):
-        status = member.get("status", "stopped")
-        updated_at = member.get("updated_at")
-        if not updated_at:
-            return "offline"
-        try:
-            updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-            if datetime.now(timezone.utc) - updated.astimezone(timezone.utc) > timedelta(seconds=90):
-                return "offline"
-        except (TypeError, ValueError):
-            return "offline"
-        return status if status in ("studying", "paused", "online") else "online"
+        return member_status(member, datetime.now(timezone.utc))
 
     def _access_token(self):
         return self.online.get("auth", {}).get("access_token")
@@ -1042,6 +1033,13 @@ class Controller:
             room_time_zone,
             study_day,
         )
+        from study_companion.room_activity import (
+            missing_week_days,
+            presence_status,
+            prune_week_cache,
+            shareable_deck_name,
+            store_week_day,
+        )
 
         if self.closed or getattr(self, "config_read_error", None) is not None:
             return
@@ -1093,10 +1091,16 @@ class Controller:
         )
         review_acks = []
         stage_errors = {}
-        current_deck_name = (
-            self.tracker.current_deck_name
-            if self.online.get("share_deck_name", True) and self.tracker.status == "studying"
-            else None
+        # Keep the last opened deck visible while connected, until it changes;
+        # never carry a deck from a previous room day.
+        current_deck_name = shareable_deck_name(
+            bool(self.online.get("share_deck_name", True)),
+            self.tracker.current_deck_name,
+            getattr(self.tracker, "current_deck_day", None),
+            study_day_key,
+        )
+        published_status = presence_status(
+            self.tracker.status, getattr(self.tracker, "last_input_at", None), current
         )
         published_deck = self.online.get("published_deck")
         published_deck_matches = isinstance(published_deck, dict) and all(
@@ -1118,7 +1122,9 @@ class Controller:
             not published_deck_matches
             or (
                 current_deck_name is not None
-                and (deck_publish_age < 0 or deck_publish_age >= 60)
+                # get_group_current_decks drops decks older than 90 seconds; with the
+                # 30-second sync cadence a 45-second refresh keeps them visible.
+                and (deck_publish_age < 0 or deck_publish_age >= 45)
             )
         )
         member_cache_key = (auth["user_id"], group_id, study_day_key)
@@ -1133,6 +1139,18 @@ class Controller:
             or member_fetch_age < 0
             or member_fetch_age >= 90
         )
+        # Finished days no longer change: each is read once per room and kept
+        # while it is in the 7-day window. Reads ride on a visible-panel member
+        # refresh only, so a hidden panel never fetches them.
+        week_cache = self.online.get("room_week_stats")
+        if not isinstance(week_cache, dict):
+            week_cache = self.online["room_week_stats"] = {}
+        prune_week_cache(week_cache, study_day(current, time_zone))
+        week_fetch_days = (
+            missing_week_days(week_cache, group_id, study_day(current, time_zone))
+            if fetch_members else []
+        )
+        week_results = {}
         if group:
             previous_route = self.sync_outbox.route(self.device_id)
             # Local Anki totals are shared across rooms. Namespace the device
@@ -1192,7 +1210,7 @@ class Controller:
                 answer_count=int(record["answers"]),
                 time_goal_minutes=self.tracker.time_goal_minutes,
                 card_goal=self.tracker.card_goal,
-                status=self.tracker.status,
+                status=published_status,
             )
             payload = {
                 "user_id": auth["user_id"],
@@ -1331,6 +1349,19 @@ class Controller:
                         # independent member-list read fails afterwards.
                         if first_error is None:
                             first_error = error
+                week_results.clear()
+                for week_day in week_fetch_days if members is not None else []:
+                    try:
+                        week_results[week_day] = self.client.fetch_group_day_stats(
+                            token, group_id, week_day
+                        )
+                    except SupabaseError as error:
+                        if error.status == 401:
+                            raise
+                        # The day stays uncached and is drawn as a gap; the
+                        # next member refresh retries it.
+                    except Exception:
+                        pass
                 return acknowledgements, members, deck_published, first_error
             try:
                 acknowledgements, members, deck_published, upload_error = upload(token)
@@ -1442,6 +1473,12 @@ class Controller:
                     self.online["members"] = members
                     self._member_cache_key = member_cache_key
                     self._last_member_fetch_at = clock_module.time()
+                if week_results:
+                    stored_weeks = self.online.get("room_week_stats")
+                    if not isinstance(stored_weeks, dict):
+                        stored_weeks = self.online["room_week_stats"] = {}
+                    for week_day, rows in week_results.items():
+                        store_week_day(stored_weeks, group_id, week_day, rows)
                 status_ledger = getattr(self, "record_status", None)
                 upload_writes_complete = (
                     len(acknowledgements) == len(payloads)

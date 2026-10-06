@@ -600,6 +600,18 @@ class SupabaseClient:
                   "deck_name": deck_name[:300] if deck_name else None},
         )
 
+    def fetch_group_day_stats(
+        self, token: str, group_id: str, day: str
+    ) -> list[dict[str, Any]]:
+        """Read one finished room day's member totals for the weekly chart."""
+        rows = self._request(
+            "POST", "/rest/v1/rpc/get_group_device_stats", token=token,
+            body={"target_group": group_id, "target_day": day},
+        ) or []
+        if not isinstance(rows, list):
+            raise SupabaseError("방 기록 응답을 확인할 수 없습니다. / Invalid room stats response.")
+        return [row for row in rows if isinstance(row, dict) and row.get("user_id")]
+
     def fetch_group_today(
         self, token: str, group_id: str, day: str
     ) -> list[dict[str, Any]]:

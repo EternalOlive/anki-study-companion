@@ -247,6 +247,22 @@ class SupabaseClientTests(unittest.TestCase):
             "target_group": "g1", "target_user": "u3", "blocked": False,
         })
 
+    def test_fetch_group_day_stats_reads_one_room_day(self):
+        opener = FakeOpener([
+            [{"user_id": "u1", "answer_count": 12}, {"answer_count": 3}, "bad"],
+            {"unexpected": True},
+        ])
+        client = SupabaseClient(opener=opener)
+
+        rows = client.fetch_group_day_stats("access", "g1", "2026-10-03")
+
+        request = opener.calls[0][0]
+        self.assertTrue(request.full_url.endswith("/rest/v1/rpc/get_group_device_stats"))
+        self.assertEqual(body_of(request), {"target_group": "g1", "target_day": "2026-10-03"})
+        self.assertEqual(rows, [{"user_id": "u1", "answer_count": 12}])
+        with self.assertRaises(SupabaseError):
+            client.fetch_group_day_stats("access", "g1", "2026-10-03")
+
     def test_fetch_group_today_merges_profiles_with_separate_request(self):
         opener = FakeOpener([
             [{"user_id": "u1"}, {"user_id": "u2"}],

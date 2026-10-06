@@ -12,6 +12,8 @@ from datetime import datetime
 
 from aqt.qt import (
     QButtonGroup,
+    QColor,
+    QFontMetrics,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -23,6 +25,7 @@ from aqt.qt import (
     QPainter,
     QPalette,
     QPen,
+    QPointF,
     QToolButton,
     Qt,
     QVBoxLayout,
@@ -30,6 +33,18 @@ from aqt.qt import (
 )
 
 from .history import get_comparison
+from .room_activity import (
+    TIE_COLOR,
+    member_colors,
+    presence_status,
+    ranked_places,
+    led_counts,
+    slot_leader,
+    slot_rankings,
+    visible_deck_name,
+    week_days,
+    weekly_room_series,
+)
 from .study_day import (
     DAY_START_HOUR,
     room_datetime,
@@ -51,6 +66,42 @@ def _set_font(widget: QWidget, *, scale: float = 1.0, bold: bool = False) -> Non
         font.setPointSizeF(size * scale)
     font.setBold(bold)
     widget.setFont(font)
+
+
+def _slot_period(slot: int) -> str:
+    start = (DAY_START_HOUR * 60 + slot * 15) % (24 * 60)
+    end = (start + 15) % (24 * 60)
+    return f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
+
+
+def _room_now_fraction(panel: "StudyPanel") -> float:
+    """Position of the current room wall time on the 04:00→04:00 axis."""
+    local = room_datetime(_now(), panel.room_time_zone())
+    minutes = (local.hour * 60 + local.minute - DAY_START_HOUR * 60) % (24 * 60)
+    return (minutes + local.second / 60) / (24 * 60)
+
+
+def _draw_now_line(painter: QPainter, widget: QWidget, panel: "StudyPanel", top: int, bottom: int) -> None:
+    """Thin muted marker for the current time; callers draw it only for today."""
+    color = widget.palette().color(QPalette.ColorRole.WindowText)
+    color.setAlpha(120)
+    width = max(1, widget.width() - 2)
+    x = 1 + round(_room_now_fraction(panel) * width)
+    painter.setPen(QPen(color, 1))
+    painter.drawLine(x, top, x, bottom)
+
+
+def _draw_axis_labels(painter: QPainter, widget: QWidget, label_y: int) -> None:
+    metrics = painter.fontMetrics()
+    labels = ((0, "04"), (24, "10"), (48, "16"), (72, "22"), (96, "04"))
+    width = max(1, widget.width() - 2)
+    for slot, label in labels:
+        x = 1 + round(slot * width / 96)
+        if slot == 96:
+            x -= metrics.horizontalAdvance(label)
+        elif slot:
+            x -= metrics.horizontalAdvance(label) // 2
+        painter.drawText(x, label_y, label)
 
 
 def _allow_anywhere_wrap(value: str) -> str:
@@ -270,6 +321,7 @@ class ActivityTimeline(QWidget):
         self.panel = panel
         self.known = False
         self.error = False
+        self.is_today = False
         self.buckets: dict[int, dict] = {}
         self.selected_slot: int | None = None
         self._record_key = None
@@ -287,6 +339,7 @@ class ActivityTimeline(QWidget):
         )
         self.known = member.get("activity_known") is True and matches_today
         self.error = bool(member.get("activity_error")) and matches_today
+        self.is_today = matches_today
         record_key = (
             member.get("user_id"), member_day, self.panel.room_time_zone()
         )
@@ -447,6 +500,9 @@ class ActivityTimeline(QWidget):
                     shade.setAlpha(25)
                     painter.fillRect(x1 - 2, bar_top, max(5, x2 - x1 + 3), bar_space, shade)
                 painter.fillRect(x1, baseline_y - height, max(1, x2 - x1 - 1), height, foreground if selected else muted)
+            if self.is_today:
+                _draw_now_line(painter, self, self.panel, bar_top, baseline_y + 3)
+                painter.setPen(QPen(muted, 1))
 
             if self.selected_slot in self.buckets:
                 slot = self.selected_slot
@@ -475,15 +531,7 @@ class ActivityTimeline(QWidget):
                 empty,
             )
         painter.setPen(muted)
-        labels = ((0, "04"), (24, "10"), (48, "16"), (72, "22"), (96, "04"))
-        width = max(1, self.width() - 2)
-        for slot, label in labels:
-            x = 1 + round(slot * width / 96)
-            if slot == 96:
-                x -= metrics.horizontalAdvance(label)
-            elif slot:
-                x -= metrics.horizontalAdvance(label) // 2
-            painter.drawText(x, label_y, label)
+        _draw_axis_labels(painter, self, label_y)
 
         if self.hasFocus():
             focus = self.palette().color(QPalette.ColorRole.Highlight)
@@ -491,84 +539,333 @@ class ActivityTimeline(QWidget):
             painter.drawRect(0, 0, max(0, self.width() - 1), max(0, self.height() - 1))
 
 
-class WeeklyDayButton(QToolButton):
-    """One keyboard-focusable answer bar in the recent-seven-day view."""
+class RoomTimeline(QWidget):
+    """Room-wide 04→04 strip; each 15-minute slot takes its single leader's color."""
 
     def __init__(self, panel: "StudyPanel", parent=None):
         super().__init__(parent)
         self.panel = panel
-        self.day = ""
-        self.answers = 0
-        self.seconds = 0
-        self.maximum = 1
-        self.today = False
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.rankings: dict[int, list[tuple[str, int]]] = {}
+        self.colors: dict[str, str] = {}
+        self.names: dict[str, str] = {}
+        self.selected_slot: int | None = None
+        self.on_select = None
+        self._hover_hint = ""
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumWidth(20)
-        self.setFixedHeight(72)
-        self.setAutoRaise(True)
-        self.clicked.connect(lambda: self.panel.show_weekly_day(self))
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
 
-    def set_day(self, day: dict, maximum: int, today: str) -> None:
-        self.day = str(day.get("day") or "")
-        self.answers = max(0, int(day.get("answers") or 0))
-        self.seconds = max(0, int(day.get("seconds") or 0))
-        self.maximum = max(1, int(maximum))
-        self.today = self.day == today
-        self.setFixedHeight(max(72, self.fontMetrics().height() * 4))
-        try:
-            date_label = datetime.fromisoformat(self.day).strftime("%m/%d")
-        except ValueError:
-            date_label = self.day or "—"
-        description = self.panel.tr(
-            f"{date_label} · 답변 {self.answers}회 · 공부 시간 {self.panel.format_clock(self.seconds)}",
-            f"{date_label} · {self.answers} answers · study time {self.panel.format_clock(self.seconds)}",
-        )
-        if self.today:
-            description += self.panel.tr(" · 오늘 진행 중", " · today in progress")
-        self.setAccessibleName(description)
-        self.setToolTip(description)
+    def _label_font(self):
+        font = self.font()
+        font.setPointSizeF(max(8.0, font.pointSizeF() * 0.85))
+        return font
+
+    def _strip_height(self) -> int:
+        return max(12, round(self.fontMetrics().height() * 0.9))
+
+    def update_room(self, rankings: dict, colors: dict, names: dict) -> None:
+        self.rankings = dict(rankings)
+        self.colors = dict(colors)
+        self.names = dict(names)
+        if self.selected_slot not in self.rankings:
+            self.selected_slot = max(self.rankings, default=None)
+        label_height = QFontMetrics(self._label_font()).height()
+        self.setFixedHeight(self._strip_height() + 7 + label_height + 2)
+        title = self.panel.tr("방 시간대 · 15분 1등", "Room timeline · top per 15 min")
+        if self.rankings:
+            summary = title + ": " + "; ".join(
+                self.describe(slot) for slot in sorted(self.rankings)
+            )
+            hint = self.panel.tr("구간에 마우스를 올려 1등 확인", "Hover a bin to see who led")
+        else:
+            empty = self.panel.tr("오늘 답변 기록 없음", "No answers recorded today")
+            summary = f"{title}: {empty}"
+            hint = empty
+        self.setAccessibleName(f"{summary} · {self.panel.room_day_label()}")
+        # Like ActivityTimeline, the hover tooltip stays short; only the
+        # accessible name carries every bin.
+        self._hover_hint = f"{hint} · {self.panel.room_day_label()}"
+        self.setToolTip(self._hover_hint)
+        self.setAccessibleDescription(self.describe(self.selected_slot))
         self.update()
 
-    def focusInEvent(self, event) -> None:
-        super().focusInEvent(event)
-        self.panel.show_weekly_day(self)
+    def describe(self, slot: int | None) -> str:
+        if slot is None or slot not in self.rankings:
+            return ""
+        parts = [_slot_period(slot)]
+        for place, user_id, answers in ranked_places(self.rankings[slot]):
+            name = self.names.get(user_id) or self.panel.tr("친구", "Friend")
+            parts.append(self.panel.tr(
+                f"{place}등 {name} {answers}회",
+                f"#{place} {name} {answers}",
+            ))
+        return " · ".join(parts)
+
+    def _slot_at(self, x: int) -> int | None:
+        left, right = 1, max(2, self.width() - 1)
+        if x < left or x >= right:
+            return None
+        return min(95, max(0, int((x - left) * 96 / max(1, right - left))))
+
+    def mouseMoveEvent(self, event) -> None:
+        slot = self._slot_at(int(event.position().x()))
+        self.setToolTip(self.describe(slot) if slot in self.rankings else self._hover_hint)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.setToolTip(self._hover_hint)
+        super().leaveEvent(event)
+
+    def _select_slot(self, slot: int) -> None:
+        if slot not in self.rankings:
+            return
+        self.selected_slot = slot
+        self.setAccessibleDescription(self.describe(slot))
+        if callable(self.on_select):
+            self.on_select(slot)
+        self.update()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rankings:
+            slot = self._slot_at(int(event.position().x()))
+            if slot is not None:
+                closest = min(self.rankings, key=lambda candidate: abs(candidate - slot))
+                if abs(closest - slot) <= 2:
+                    self._select_slot(closest)
+                    self.setFocus()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right) and self.rankings:
+            slots = sorted(self.rankings)
+            index = slots.index(self.selected_slot) if self.selected_slot in slots else 0
+            step = 1 if event.key() == Qt.Key.Key_Right else -1
+            self._select_slot(slots[max(0, min(len(slots) - 1, index + step))])
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         foreground = self.palette().color(QPalette.ColorRole.WindowText)
         muted = self.palette().color(QPalette.ColorRole.WindowText)
         muted.setAlpha(170)
-        font = painter.font()
-        font.setPointSizeF(max(6.5, font.pointSizeF() * 0.68))
-        painter.setFont(font)
-        metrics = painter.fontMetrics()
-        label_top = max(16, self.height() - metrics.height() - 3)
-        bar_bottom = max(12, label_top - 4)
-        available_bar_height = max(6, bar_bottom - 7)
-        bar_height = round(available_bar_height * self.answers / self.maximum) if self.answers else 1
-        bar_width = max(4, min(14, self.width() - 8))
-        bar_x = (self.width() - bar_width) // 2
-        color = foreground if self.answers else muted
-        painter.fillRect(bar_x, bar_bottom - bar_height, bar_width, bar_height, color)
+        track = self.palette().color(QPalette.ColorRole.WindowText)
+        track.setAlpha(22)
+        strip_top = 3
+        strip_height = self._strip_height()
+        strip_bottom = strip_top + strip_height
+        width = max(1, self.width() - 2)
+        painter.fillRect(1, strip_top, width, strip_height, track)
+        for slot, ranking in self.rankings.items():
+            x1 = 1 + round(slot * width / 96)
+            x2 = 1 + round((slot + 1) * width / 96)
+            leader = slot_leader(ranking)
+            color = QColor(self.colors.get(leader, TIE_COLOR) if leader else TIE_COLOR)
+            painter.fillRect(x1, strip_top, max(1, x2 - x1), strip_height, color)
+        if self.selected_slot in self.rankings:
+            x1 = 1 + round(self.selected_slot * width / 96)
+            x2 = 1 + round((self.selected_slot + 1) * width / 96)
+            painter.fillRect(x1 - 1, strip_bottom + 1, max(3, x2 - x1 + 2), 2, foreground)
+        _draw_now_line(painter, self, self.panel, strip_top - 2, strip_bottom + 2)
 
+        painter.setFont(self._label_font())
         painter.setPen(muted)
-        try:
-            label = datetime.fromisoformat(self.day).strftime("%m/%d")
-        except ValueError:
-            label = "—"
-        painter.drawText(
-            self.rect().adjusted(0, label_top, 0, 0),
-            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-            label,
-        )
+        _draw_axis_labels(painter, self, strip_bottom + 5 + painter.fontMetrics().ascent())
 
-        if self.today or self.hasFocus():
-            border = self.palette().color(
-                QPalette.ColorRole.Highlight if self.hasFocus() else QPalette.ColorRole.Mid
-            )
-            painter.setPen(QPen(border, 2 if self.hasFocus() else 1))
-            painter.drawRoundedRect(1, 1, max(0, self.width() - 3), max(0, self.height() - 3), 3, 3)
+        if self.hasFocus():
+            focus = self.palette().color(QPalette.ColorRole.Highlight)
+            painter.setPen(QPen(focus, 1))
+            painter.drawRect(0, 0, max(0, self.width() - 1), max(0, self.height() - 1))
+
+
+class WeeklyLineChart(QWidget):
+    """Recent seven room days as one answer-count line per room member."""
+
+    def __init__(self, panel: "StudyPanel", parent=None):
+        super().__init__(parent)
+        self.panel = panel
+        self.days: list[str] = []
+        self.series: list[dict] = []
+        self.today = ""
+        self.selected_index: int | None = None
+        self._hover_hint = ""
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
+
+    def _small_font(self):
+        font = self.font()
+        font.setPointSizeF(max(6.5, font.pointSizeF() * 0.72))
+        return font
+
+    def set_data(self, days: list[str], series: list[dict], today: str) -> None:
+        """``series`` items: key, name, color, me, values (7 ints, None = gap)."""
+        self.days = list(days)
+        self.series = list(series)
+        self.today = today
+        self.setFixedHeight(max(96, self.fontMetrics().height() * 6))
+        if self.selected_index is not None and self.selected_index >= len(self.days):
+            self.selected_index = None
+        gaps = any(value is None for item in self.series for value in item["values"])
+        title = self.panel.tr("최근 7일 답변 수", "Answers, recent 7 days")
+        self.setAccessibleName(title + ": " + "; ".join(
+            self.day_description(index) for index in range(len(self.days))
+        ))
+        hint = self.panel.tr("날짜를 눌러 사람별 답변 확인", "Select a day to compare answers")
+        if gaps:
+            hint += self.panel.tr("\n끊긴 선: 확인 못 한 날", "\nGaps: days not loaded")
+        self._hover_hint = hint
+        self.setToolTip(hint)
+        if self.selected_index is not None:
+            self.setAccessibleDescription(self.day_description(self.selected_index))
+        self.update()
+
+    def day_label(self, index: int, *, short: bool = False) -> str:
+        try:
+            parsed = datetime.fromisoformat(self.days[index])
+        except (IndexError, ValueError):
+            return "—"
+        return str(parsed.day) if short else parsed.strftime("%m/%d")
+
+    def day_description(self, index: int) -> str:
+        parts = [self.day_label(index)]
+        for item in self.series:
+            value = item["values"][index] if index < len(item["values"]) else None
+            if value is None:
+                parts.append(self.panel.tr(f"{item['name']} 확인 못 함", f"{item['name']} not loaded"))
+            else:
+                parts.append(self.panel.tr(f"{item['name']} {value}회", f"{item['name']} {value}"))
+        text = " · ".join(parts)
+        if index < len(self.days) and self.days[index] == self.today:
+            text += self.panel.tr(" · 오늘 진행 중", " · today in progress")
+        return text
+
+    def _plot_rect(self) -> tuple[int, int, int, int]:
+        small = QFontMetrics(self._small_font())
+        side = max(12, small.horizontalAdvance("00/00") // 2 + 2)
+        top = small.height() + 4
+        bottom = self.height() - small.height() - 6
+        return side, top, max(side + 1, self.width() - side), max(top + 6, bottom)
+
+    def _x_for(self, index: int) -> int:
+        left, _top, right, _bottom = self._plot_rect()
+        if len(self.days) <= 1:
+            return (left + right) // 2
+        return left + round(index * (right - left) / (len(self.days) - 1))
+
+    def _index_at(self, x: int) -> int | None:
+        if not self.days:
+            return None
+        return min(range(len(self.days)), key=lambda index: abs(self._x_for(index) - x))
+
+    def select_index(self, index: int | None) -> None:
+        if index is None or not self.days:
+            return
+        self.selected_index = max(0, min(len(self.days) - 1, index))
+        self.setAccessibleDescription(self.day_description(self.selected_index))
+        self.panel.show_weekly_day(self.selected_index)
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        index = self._index_at(int(event.position().x()))
+        self.setToolTip(self.day_description(index) if index is not None else self._hover_hint)
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self.setToolTip(self._hover_hint)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.select_index(self._index_at(int(event.position().x())))
+            self.setFocus()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if not self.days:
+            super().keyPressEvent(event)
+            return
+        last = len(self.days) - 1
+        if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            step = 1 if event.key() == Qt.Key.Key_Right else -1
+            self.select_index(last if self.selected_index is None else self.selected_index + step)
+            event.accept()
+            return
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.select_index(last if self.selected_index is None else self.selected_index)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        foreground = self.palette().color(QPalette.ColorRole.WindowText)
+        muted = self.palette().color(QPalette.ColorRole.WindowText)
+        muted.setAlpha(170)
+        grid = self.palette().color(QPalette.ColorRole.WindowText)
+        grid.setAlpha(45)
+        painter.setFont(self._small_font())
+        metrics = painter.fontMetrics()
+        left, top, right, bottom = self._plot_rect()
+        values = [value for item in self.series for value in item["values"] if value is not None]
+        maximum = max([1, *values])
+
+        painter.setPen(QPen(grid, 1))
+        painter.drawLine(left, bottom, right, bottom)
+        painter.drawLine(left, top, right, top)
+        painter.setPen(muted)
+        painter.drawText(1, metrics.ascent() + 1, self.panel.tr(f"{maximum}회", f"{maximum}"))
+
+        if self.selected_index is not None and self.days:
+            shade = self.palette().color(QPalette.ColorRole.WindowText)
+            shade.setAlpha(25)
+            x = self._x_for(self.selected_index)
+            band = max(10, (right - left) // max(1, len(self.days) * 2))
+            painter.fillRect(x - band // 2, top, band, bottom - top, shade)
+
+        def point(index: int, value: int) -> QPointF:
+            return QPointF(self._x_for(index), bottom - (bottom - top) * value / maximum)
+
+        # Friends first so the thicker "me" line stays on top.
+        ordered = [item for item in self.series if not item.get("me")] + [
+            item for item in self.series if item.get("me")
+        ]
+        for item in ordered:
+            color = QColor(item["color"])
+            pen = QPen(color, 2.6 if item.get("me") else 1.5)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            item_values = item["values"]
+            for index in range(len(item_values) - 1):
+                if item_values[index] is None or item_values[index + 1] is None:
+                    continue
+                painter.drawLine(point(index, item_values[index]), point(index + 1, item_values[index + 1]))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            radius = 3.0 if item.get("me") else 2.2
+            for index, value in enumerate(item_values):
+                if value is not None:
+                    painter.drawEllipse(point(index, value), radius, radius)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+        label_y = self.height() - 3 - metrics.descent()
+        spacing = (right - left) / max(1, len(self.days) - 1)
+        # Narrow panels with large text fall back to day-of-month labels.
+        short = metrics.horizontalAdvance("00/00") + 6 > spacing
+        for index in range(len(self.days)):
+            label = self.day_label(index, short=short)
+            painter.setPen(foreground if self.days[index] == self.today else muted)
+            x = self._x_for(index) - metrics.horizontalAdvance(label) // 2
+            x = max(0, min(self.width() - metrics.horizontalAdvance(label), x))
+            painter.drawText(x, label_y, label)
+
+        if self.hasFocus():
+            focus = self.palette().color(QPalette.ColorRole.Highlight)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            painter.setPen(QPen(focus, 1))
+            painter.drawRect(0, 0, max(0, self.width() - 1), max(0, self.height() - 1))
 
 
 class MemberRow(QWidget):
@@ -752,14 +1049,11 @@ class MemberRow(QWidget):
 
         time_goal = max(0, int(member.get("time_goal_minutes") or 0))
         answer_goal = max(0, int(member.get("card_goal") or 0))
-        deck_name = None
-        if status == "studying" and member.get("current_deck_name"):
-            try:
-                stamp = datetime.fromisoformat(member["deck_updated_at"].replace("Z", "+00:00"))
-                if 0 <= (_now() - stamp).total_seconds() <= 90:
-                    deck_name = _allow_anywhere_wrap(str(member["current_deck_name"]))
-            except (KeyError, TypeError, ValueError):
-                pass
+        # The last shared deck stays until it changes, but never one from a
+        # previous room day or from a friend who has gone offline.
+        deck_name = visible_deck_name(member, status, _now(), self.panel.room_time_zone())
+        if deck_name:
+            deck_name = _allow_anywhere_wrap(deck_name)
         self.deck.setText(deck_name or "")
         self.deck.setVisible(bool(deck_name))
         self.deck.setAccessibleName(
@@ -917,6 +1211,27 @@ class StudyPanel(QWidget):
 
         outer.addWidget(self._separator())
 
+        self.room_activity = QWidget(self)
+        room_activity_layout = QVBoxLayout(self.room_activity)
+        room_activity_layout.setContentsMargins(0, 0, 0, 4)
+        room_activity_layout.setSpacing(3)
+        self.room_activity_title = QLabel(self.room_activity)
+        _set_font(self.room_activity_title, bold=True)
+        room_activity_layout.addWidget(self.room_activity_title)
+        self.room_timeline = RoomTimeline(self, self.room_activity)
+        self.room_timeline.on_select = self._show_room_slot
+        room_activity_layout.addWidget(self.room_timeline)
+        self.room_timeline_detail = QLabel(self.room_activity)
+        self.room_timeline_detail.setTextFormat(Qt.TextFormat.PlainText)
+        self.room_timeline_detail.setWordWrap(True)
+        room_activity_layout.addWidget(self.room_timeline_detail)
+        self.room_timeline_legend = QLabel(self.room_activity)
+        self.room_timeline_legend.setTextFormat(Qt.TextFormat.RichText)
+        self.room_timeline_legend.setWordWrap(True)
+        room_activity_layout.addWidget(self.room_timeline_legend)
+        self.room_activity.hide()
+        outer.addWidget(self.room_activity)
+
         columns = QHBoxLayout()
         self.people_caption = QLabel(self)
         _set_font(self.people_caption, bold=True)
@@ -980,14 +1295,13 @@ class StudyPanel(QWidget):
             f"Anki review history synced to this PC · {self.room_day_label()}",
         ))
         history_layout.addWidget(self.weekly_title)
-        self.weekly_bars = QWidget(self.history_body)
-        weekly_bars_layout = QHBoxLayout(self.weekly_bars)
-        weekly_bars_layout.setContentsMargins(0, 0, 0, 0)
-        weekly_bars_layout.setSpacing(3)
-        self.weekly_days = [WeeklyDayButton(self, self.weekly_bars) for _ in range(7)]
-        for button in self.weekly_days:
-            weekly_bars_layout.addWidget(button, 1)
-        history_layout.addWidget(self.weekly_bars)
+        self.weekly_chart = WeeklyLineChart(self, self.history_body)
+        history_layout.addWidget(self.weekly_chart)
+        self.weekly_legend = QLabel(self.history_body)
+        self.weekly_legend.setTextFormat(Qt.TextFormat.RichText)
+        self.weekly_legend.setWordWrap(True)
+        self.weekly_legend.hide()
+        history_layout.addWidget(self.weekly_legend)
         self.weekly_day_detail = QLabel(self.history_body)
         self.weekly_day_detail.setWordWrap(True)
         self.weekly_day_detail.hide()
@@ -1409,27 +1723,63 @@ class StudyPanel(QWidget):
         record = getter(current) if callable(getter) else None
         days = list((record or {}).get("days") or [])
         valid = len(days) == 7
-        self.weekly_bars.setVisible(valid)
+        self.weekly_chart.setVisible(valid)
         if not valid:
             self.weekly_day_detail.hide()
+            self.weekly_legend.hide()
             self.weekly_summary.setText(
                 self.tr("주간 기록을 확인할 수 없습니다.", "Weekly history unavailable.")
             )
             return
 
-        maximum = max(1, *(max(0, int(day.get("answers") or 0)) for day in days))
-        today = self.current_room_day(current).isoformat()
-        for button, day in zip(self.weekly_days, days):
-            button.set_day(day, maximum, today)
+        today_date = self.current_room_day(current)
+        today = today_date.isoformat()
+        self._weekly_days = days
+        day_keys = [str(day.get("day") or "") for day in days]
+        colors = self._room_member_colors()
+        my_id = (self.controller.online.get("auth") or {}).get("user_id")
+        series = [{
+            "key": my_id or "me",
+            "name": self.tr("나", "You"),
+            "color": self.my_color(),
+            "me": True,
+            "values": [max(0, int(day.get("answers") or 0)) for day in days],
+        }]
+        group = self.controller.online.get("group")
+        if group:
+            friends = [
+                member for member in (self.controller.online.get("members") or [])
+                if member.get("user_id") and member.get("user_id") != my_id
+            ]
+            room_series = weekly_room_series(
+                self.controller.online.get("room_week_stats") or {},
+                str(group.get("id")), today_date, friends,
+            )
+            for member in friends:
+                by_day = dict(zip(week_days(today_date), room_series[str(member["user_id"])]))
+                series.append({
+                    "key": str(member["user_id"]),
+                    "name": self.member_name(member),
+                    "color": colors.get(str(member["user_id"]), TIE_COLOR),
+                    "me": False,
+                    "values": [by_day.get(day) for day in day_keys],
+                })
+        self.weekly_chart.set_data(day_keys, series, today)
+        self.weekly_legend.setVisible(len(series) > 1)
+        if len(series) > 1:
+            self.weekly_legend.setText(self._legend_html(
+                (item["color"], item["name"], "") for item in series
+            ))
+            self.weekly_legend.setAccessibleName(
+                ", ".join(item["name"] for item in series)
+            )
 
-        selected = next(
-            (button for button in self.weekly_days if button.day == self.weekly_selected_day),
-            None,
-        )
-        if selected:
-            self.weekly_day_detail.setText(self._weekly_detail(selected))
+        if self.weekly_selected_day in day_keys:
+            self.weekly_chart.selected_index = day_keys.index(self.weekly_selected_day)
+            self.weekly_day_detail.setText(self._weekly_detail(self.weekly_chart.selected_index))
             self.weekly_day_detail.show()
         else:
+            self.weekly_chart.selected_index = None
             self.weekly_day_detail.hide()
 
         active_days = max(0, int(record.get("active_days") or 0))
@@ -1475,16 +1825,105 @@ class StudyPanel(QWidget):
             f"Compares recent and previous 7-day periods at {cutoff}.",
         ))
 
-    def show_weekly_day(self, button: WeeklyDayButton) -> None:
-        self.weekly_selected_day = button.day
-        self.weekly_day_detail.setText(self._weekly_detail(button))
+    def show_weekly_day(self, index: int) -> None:
+        chart = self.weekly_chart
+        if not 0 <= index < len(chart.days):
+            return
+        self.weekly_selected_day = chart.days[index]
+        self.weekly_day_detail.setText(self._weekly_detail(index))
         self.weekly_day_detail.setVisible(True)
 
-    def _weekly_detail(self, button: WeeklyDayButton) -> str:
-        day = button.day[5:].replace("-", "/")
-        duration = self.format_clock(button.seconds)
-        return self.tr(f"{day} · {duration} · {button.answers}회",
-                       f"{day} · {duration} · {button.answers} answers")
+    def _weekly_detail(self, index: int) -> str:
+        chart = self.weekly_chart
+        day = chart.days[index][5:].replace("-", "/")
+        days = getattr(self, "_weekly_days", [])
+        seconds = max(0, int(days[index].get("seconds") or 0)) if index < len(days) else 0
+        parts = [day, self.format_clock(seconds)]
+        for item in chart.series:
+            value = item["values"][index]
+            if value is None:
+                parts.append(f"{item['name']} —")
+            elif len(chart.series) == 1:
+                parts.append(self.tr(f"{value}회", f"{value} answers"))
+            else:
+                parts.append(self.tr(f"{item['name']} {value}회", f"{item['name']} {value}"))
+        return " · ".join(parts)
+
+    def my_color(self) -> str:
+        return self.palette().color(QPalette.ColorRole.Highlight).name()
+
+    def _room_member_colors(self) -> dict[str, str]:
+        """Stable member colors by join order; me uses the theme highlight."""
+        my_id = (self.controller.online.get("auth") or {}).get("user_id")
+        ids = [
+            str(member.get("user_id"))
+            for member in (self.controller.online.get("members") or [])
+            if member.get("user_id")
+        ]
+        if my_id and str(my_id) not in ids:
+            ids.append(str(my_id))
+        return member_colors(ids, str(my_id) if my_id else None, self.my_color())
+
+    def _legend_html(self, entries) -> str:
+        """Color dot + name (+ suffix) entries that wrap only between entries."""
+        items = []
+        for color, name, suffix in entries:
+            text = html.escape(_allow_anywhere_wrap(str(name)))
+            if suffix:
+                text += "&nbsp;" + html.escape(suffix).replace(" ", "&nbsp;")
+            items.append(f'<span style="color: {color}">●</span>&nbsp;{text}')
+        return " &nbsp; ".join(items)
+
+    def _refresh_room_activity(self, current: datetime, group, raw_members, my_id) -> None:
+        today = self.current_room_day(current).isoformat()
+        todays = [
+            member for member in (raw_members or [])
+            if member.get("user_id") and member.get("study_day") in (None, today)
+        ]
+        known = any(member.get("activity_known") is True for member in todays)
+        self.room_activity.setVisible(bool(group) and known)
+        if not (group and known):
+            return
+        self.room_activity_title.setText(self.tr("방 시간대 · 15분 1등", "Room timeline · top per 15 min"))
+        colors = self._room_member_colors()
+        names = {
+            str(member["user_id"]): (
+                self.tr("나", "You") if member.get("user_id") == my_id else self.member_name(member)
+            )
+            for member in todays
+        }
+        rankings = slot_rankings(todays)
+        self.room_timeline.update_room(rankings, colors, names)
+        self._show_room_slot(self.room_timeline.selected_slot)
+        counts = led_counts(rankings)
+        active = {user_id for ranking in rankings.values() for user_id, _answers in ranking}
+        entries = [
+            (
+                colors.get(str(member["user_id"]), TIE_COLOR),
+                names[str(member["user_id"])],
+                self.tr(
+                    f"1등 {counts.get(str(member['user_id']), 0)}번",
+                    f"1st ×{counts.get(str(member['user_id']), 0)}",
+                ),
+            )
+            for member in todays
+            if str(member["user_id"]) in active
+        ]
+        self.room_timeline_legend.setVisible(bool(entries))
+        self.room_timeline_legend.setText(self._legend_html(entries))
+        self.room_timeline_legend.setAccessibleName(
+            ", ".join(f"{name} {suffix}" for _color, name, suffix in entries)
+        )
+        self.room_timeline_legend.setToolTip(self.tr(
+            "동점인 구간은 회색이며 누구의 1등으로도 세지 않습니다.",
+            "Tied bins are gray and count for nobody.",
+        ))
+
+    def _show_room_slot(self, slot) -> None:
+        text = self.room_timeline.describe(slot)
+        self.room_timeline_detail.setText(_allow_anywhere_wrap(
+            text or self.tr("오늘 답변 기록 없음", "No answers recorded today")
+        ))
 
     def _rate_text(self, value) -> str:
         if value is None:
@@ -1559,21 +1998,16 @@ class StudyPanel(QWidget):
                 for member in (raw_members or [])
                 if member.get("user_id") != my_id
             ]
-            studying_count = (1 if tracker.status == "studying" else 0) + sum(
-                self.controller._current_member_status(member) == "studying"
+            # Everyone who is not offline counts; this PC is always connected.
+            online_count = 1 + sum(
+                self.controller._current_member_status(member) != "offline"
                 for member in members
             )
             if members_known:
-                if tracker.status == "studying":
-                    presence = self.tr(
-                        f"{studying_count}명 공부 중 · 나 포함",
-                        f"{studying_count} studying · including you",
-                    )
-                else:
-                    presence = self.tr(
-                        f"{studying_count}명 공부 중", f"{studying_count} studying"
-                    )
-                self.room_presence.setText(presence)
+                self.room_presence.setText(self.tr(
+                    f"{online_count}명 접속 중 · 나 포함",
+                    f"{online_count} online · including you",
+                ))
             else:
                 self.room_presence.setText(self.tr("기록 확인 중", "Checking records"))
         else:
@@ -1604,13 +2038,14 @@ class StudyPanel(QWidget):
                 f"PC study time updates live and pauses after 1 minute without input.\nA new study day starts at {self.room_day_label()}. Mobile answers appear after Anki sync.",
             )
         )
-        own_status = self.status_text(
-            "online" if tracker.status == "stopped" else tracker.status
+        # Show the same presence friends see: studying for 2 minutes after the
+        # last input, even though the study timer itself pauses after 1 minute.
+        published = presence_status(
+            tracker.status, getattr(tracker, "last_input_at", None), current
         )
-        self.own_status.setText(own_status)
-        self.update_status_dot(
-            self.own_dot, "online" if tracker.status == "stopped" else tracker.status
-        )
+        own_status = "online" if published == "stopped" else published
+        self.own_status.setText(self.status_text(own_status))
+        self.update_status_dot(self.own_dot, own_status)
 
         # Live PC time advances every tick; synced review answers can include mobile.
         seconds = max(0, int(live_record.get("seconds") or 0))
@@ -1635,6 +2070,7 @@ class StudyPanel(QWidget):
         self.time_caption.setText(self.tr("공부 시간", "Study time"))
         self.answer_caption.setText(self.tr("답변", "Answers"))
 
+        self._refresh_room_activity(current, group, raw_members, my_id)
         self.people_caption.setText(self.tr("친구", "Friends"))
         self.time_column.setText(self.tr("시간", "Time"))
         self.answer_column.setText(self.tr("답변", "Answers"))

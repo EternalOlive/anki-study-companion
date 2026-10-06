@@ -8,7 +8,11 @@ from .study_day import DEFAULT_TIME_ZONE, split_interval, study_day
 
 
 TIMEZONE = timezone(timedelta(hours=9))
-IDLE_AFTER = timedelta(minutes=1)
+# Study time stops accumulating after this long without review input.  The
+# published "studying" presence uses room_activity.PRESENCE_STUDYING_WINDOW
+# (2 minutes) instead, so short pauses do not flip the friend-visible status.
+STUDY_TIME_IDLE_AFTER = timedelta(minutes=1)
+IDLE_AFTER = STUDY_TIME_IDLE_AFTER
 
 
 def answers_per_minute(seconds: float, answers: int) -> float | None:
@@ -79,8 +83,10 @@ class StudyTracker:
         self.counted_until = None
         self.current_deck_id = None
         self.current_deck_name = None
+        self.current_deck_day = None
 
     def set_deck(self, deck_id: str, deck_name: str, now: datetime) -> None:
+        self.current_deck_day = study_day(now, self.time_zone).isoformat()
         if deck_id == self.current_deck_id:
             self.current_deck_name = deck_name
             return
@@ -127,7 +133,7 @@ class StudyTracker:
     def tick(self, now: datetime) -> None:
         if self.status != "studying":
             return
-        deadline = self.last_input_at + IDLE_AFTER
+        deadline = self.last_input_at + STUDY_TIME_IDLE_AFTER
         end = min(now, deadline)
         cursor = self.counted_until
         for day, seconds in split_interval(cursor, end, self.time_zone):
