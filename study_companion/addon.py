@@ -48,7 +48,12 @@ from .ux_services import (
     validate_goal,
 )
 from .activity import weekly_activity
-from .room_activity import member_status, presence_status
+from .realtime import (
+    RealtimeClient,
+    apply_presence_to_members,
+    apply_review_tick_to_members,
+)
+from .room_activity import member_status, presence_status, shareable_deck_name
 from .reviews import ReviewHistory
 from .study_day import (
     DEFAULT_TIME_ZONE,
@@ -56,6 +61,7 @@ from .study_day import (
     day_bounds,
     room_time_zone,
     study_day,
+    ten_minute_slot,
 )
 from .panel import PanelToggleButton, StudyPanel
 from .tracker import (
@@ -229,6 +235,9 @@ class Controller:
             self.locale = "ko"
         self.ui_state = data.get("ui_state", {})
         self.client = SupabaseClient()
+        self.realtime = RealtimeClient(apikey=getattr(self.client, "key", ""), parent=mw)
+        self.realtime.review_tick_received.connect(self._on_realtime_review_tick)
+        self.realtime.presence_changed.connect(self._on_realtime_presence_changed)
         self.sync_in_flight = False
         self.sync_pending = False
         self.sync_failure_count = 0
@@ -259,6 +268,8 @@ class Controller:
 
     def close(self):
         self.closed = True
+        if getattr(self, "realtime", None) is not None:
+            self.realtime.leave_room()
         settings_dialog = getattr(self, "_settings_dialog", None)
         if settings_dialog is not None:
             settings_dialog.reject()
@@ -388,6 +399,46 @@ class Controller:
             user_id=user_id, group_id=group_id, pending=pending
         )
 
+    def _on_realtime_review_tick(self, user_id: str, slot: int, answers: int, time_ms: int):
+        members = self.online.get("members")
+        if isinstance(members, list):
+            if apply_review_tick_to_members(members, user_id, slot, answers, time_ms):
+                self.refresh()
+
+    def _on_realtime_presence_changed(self, presences: dict):
+        members = self.online.get("members")
+        if isinstance(members, list):
+            current_iso = now().isoformat()
+            if apply_presence_to_members(members, presences, current_iso):
+                self.refresh()
+
+    def _sync_realtime_connection(self):
+        realtime = getattr(self, "realtime", None)
+        if realtime is None or not realtime.is_available():
+            return
+        group = self.online.get("group") or {}
+        auth = self.online.get("auth") or {}
+        group_id = group.get("id")
+        user_id = auth.get("user_id")
+        if group_id and user_id:
+            realtime.join_room(group_id, user_id)
+            current = now()
+            status = presence_status(self.tracker.status, self.tracker.last_input_at, current)
+            deck_name = shareable_deck_name(
+                self.online.get("share_deck_name", True),
+                self.tracker.current_deck_name,
+                self.tracker.deck_opened_day,
+                study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
+            )
+            display_name = canonical_nickname(user_id)
+            realtime.update_presence(
+                status=status,
+                current_deck_name=deck_name,
+                display_name=display_name,
+            )
+        else:
+            realtime.leave_room()
+
     def tick(self):
         self.tracker.tick(now())
         current = now()
@@ -396,10 +447,12 @@ class Controller:
         ) is None:
             self.refresh_review_history()
         self.ticks_since_save += 1
-        if self.ticks_since_save >= 30:
+        sync_interval = 300 if getattr(self, "realtime", None) and self.realtime.is_connected() else 30
+        if self.ticks_since_save >= sync_interval:
             self.save()
             self.sync_async()
             self.ticks_since_save = 0
+        self._sync_realtime_connection()
         self.refresh()
 
     def input(self):
@@ -423,10 +476,14 @@ class Controller:
         self.refresh()
 
     def answer(self, reviewer, card, ease):
-        self.tracker.answer(now())
+        current = now()
+        self.tracker.answer(current)
         self.review_dirty = True
         self.refresh_review_history()
         self.save()
+        if getattr(self, "realtime", None) and self.realtime.is_connected():
+            slot = ten_minute_slot(current, getattr(self.tracker, "time_zone", "Asia/Seoul"))
+            self.realtime.broadcast_review_tick(slot=slot, count=1, time_ms=0)
         self.refresh()
 
     def state_changed(self, new_state, old_state):

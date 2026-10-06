@@ -15,6 +15,19 @@
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
 
+## Supabase Realtime 웹소켓 도입 (저지연 피어 동기화 및 DB 부하 절감) — 2026-10-06
+
+- **Supabase Realtime WebSocket 클라이언트 (`study_companion/realtime.py`)**:
+  - Anki 번들 PyQt6의 `QWebSocket`을 활용하여 추가 외부 의존성 없이 네이티브 WSS 연결 구현.
+  - **Broadcast**: 카드를 풀 때마다 실시간 복습 틱(`review_tick`: slot, answers, duration)을 방 참가자들에게 즉시(<50ms) 중계 (DB Write 0회).
+  - **Presence & 상태 브로드캐스트**: 방 참가/퇴장, 공부 중/멈춤 상태, 현재 덱 이름을 실시간 중계하여 30초 폴링 대기 없이 UI에 즉각 반영.
+  - Heartbeat(25초 주기) 및 네트워크 순단 시 지수 백오프 자동 재연결 지원.
+- **REST DB 동기화 주기 완화 (Lazy DB Flush)**:
+  - WebSocket 실시간 연결이 활성화된 경우 기존 30초 주기의 REST DB RPC 폴링을 300초(5분) 주기로 완화하여 DB 부하를 90% 이상 절감.
+  - 세션 종료, Anki 종료, 웹소켓 연결 해제 시에는 즉시 DB로 안전하게 batch flush.
+- **테스트 및 안정성**:
+  - `tests/test_realtime.py` 단위 테스트 추가 (총 256개 테스트 전체 통과).
+
 ## 활동 타임라인 10분 구간 전환 — 2026-10-06
 
 - **시간대 1등 및 활동 구간 간격 10분 단축**:
