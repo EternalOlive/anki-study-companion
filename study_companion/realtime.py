@@ -12,6 +12,8 @@ import json
 import logging
 from typing import Any, Callable
 
+from .nicknames import sanitize_display_name
+
 try:
     from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
     from PyQt6.QtWebSockets import QWebSocket
@@ -88,12 +90,19 @@ def apply_review_tick_to_members(
     return False
 
 
+def _clean_peer_meta(meta: dict[str, Any], user_id: str) -> dict[str, Any]:
+    cleaned = dict(meta)
+    if "display_name" in cleaned and cleaned["display_name"] is not None:
+        cleaned["display_name"] = sanitize_display_name(cleaned["display_name"], user_id)
+    return cleaned
+
+
 def apply_presence_to_members(
     members: list[dict[str, Any]],
     presences: dict[str, dict[str, Any]],
     current_iso: str,
 ) -> bool:
-    """Update member online statuses and deck names from presence dictionary."""
+    """Update member online statuses, deck names, and display names from presence dictionary."""
     changed = False
     for member in members:
         uid = str(member.get("user_id") or "")
@@ -105,6 +114,11 @@ def apply_presence_to_members(
             if "current_deck_name" in meta and member.get("current_deck_name") != meta["current_deck_name"]:
                 member["current_deck_name"] = meta["current_deck_name"]
                 changed = True
+            if "display_name" in meta and meta["display_name"]:
+                safe_name = sanitize_display_name(meta["display_name"], uid)
+                if member.get("display_name") != safe_name:
+                    member["display_name"] = safe_name
+                    changed = True
             member["updated_at"] = current_iso
             member["deck_updated_at"] = current_iso
     return changed
@@ -223,7 +237,7 @@ class RealtimeClient(QObject):
             "current_deck_name": current_deck_name,
         }
         if display_name:
-            meta["display_name"] = display_name
+            meta["display_name"] = sanitize_display_name(display_name, self.user_id)
         if meta == self._last_presence_meta:
             return
         self._last_presence_meta = meta
@@ -402,7 +416,7 @@ class RealtimeClient(QObject):
             elif inner_event == "member_state":
                 user_id = str(inner_payload.get("user_id") or "")
                 if user_id and user_id != self.user_id:
-                    self._presence_store[user_id] = inner_payload
+                    self._presence_store[user_id] = _clean_peer_meta(inner_payload, user_id)
                     self.presence_changed.emit(dict(self._presence_store))
             elif inner_event == "room_ping":
                 user_id = str(inner_payload.get("user_id") or "")
@@ -417,7 +431,7 @@ class RealtimeClient(QObject):
             for key, val in payload.items():
                 metas = val.get("metas") or []
                 if metas:
-                    self._presence_store[key] = dict(metas[0])
+                    self._presence_store[key] = _clean_peer_meta(metas[0], str(key))
             self.presence_changed.emit(dict(self._presence_store))
             return
 
@@ -430,6 +444,6 @@ class RealtimeClient(QObject):
             for key, val in joins.items():
                 metas = val.get("metas") or []
                 if metas:
-                    self._presence_store[key] = dict(metas[0])
+                    self._presence_store[key] = _clean_peer_meta(metas[0], str(key))
             self.presence_changed.emit(dict(self._presence_store))
             return

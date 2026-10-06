@@ -33,8 +33,13 @@ from .online import (
     load_or_create_device_id,
     profile_device_id,
 )
-from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
-from .outbox import SyncOutbox
+from .nicknames import (
+    canonical_nickname,
+    disambiguate_nickname,
+    localize_nickname,
+    sanitize_display_name,
+    validate_display_name,
+)
 from .record_status import (
     LOCAL_READ,
     LOCAL_SAVE,
@@ -430,7 +435,10 @@ class Controller:
                 self.tracker.deck_opened_day,
                 study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
             )
-            display_name = canonical_nickname(user_id)
+            display_name = sanitize_display_name(
+                self.online.get("display_name"),
+                user_id,
+            )
             realtime.update_presence(
                 status=status,
                 current_deck_name=deck_name,
@@ -697,15 +705,100 @@ class Controller:
         self.refresh()
 
     def display_member_name(self, member):
-        name = member.get("display_name") or canonical_nickname(member.get("user_id") or "local")
+        name = sanitize_display_name(
+            member.get("display_name"),
+            member.get("user_id") or "local",
+        )
         display = localize_nickname(name, self.locale)
         duplicates = {
             item.get("user_id") for item in self.online.get("members", [])
-            if item.get("display_name") == name and item.get("user_id")
+            if sanitize_display_name(item.get("display_name"), item.get("user_id") or "local") == name and item.get("user_id")
         }
         if len(duplicates) > 1:
             display = disambiguate_nickname(display, member["user_id"], True)
         return display
+
+    def set_display_name(self, name: str) -> bool:
+        """Update the user's custom nickname, save config, update profile on server, and notify room."""
+        if not validate_display_name(name):
+            return False
+        self.online["display_name"] = name
+        self.online["synced_display_name"] = ""
+        self.save()
+
+        auth = self.online.get("auth") or {}
+        token = self._access_token()
+        user_id = auth.get("user_id")
+        if token and user_id:
+            def _upload():
+                try:
+                    self.client.upsert_profile(token, user_id, name)
+                    self.online["synced_display_name"] = name
+                except Exception:
+                    pass
+            self.executor.submit(_upload)
+
+            realtime = getattr(self, "realtime", None)
+            if realtime is not None and realtime.is_available():
+                current = now()
+                status = presence_status(self.tracker.status, self.tracker.last_input_at, current)
+                deck_name = shareable_deck_name(
+                    self.online.get("share_deck_name", True),
+                    self.tracker.current_deck_name,
+                    self.tracker.deck_opened_day,
+                    study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
+                )
+                realtime.update_presence(
+                    status=status,
+                    current_deck_name=deck_name,
+                    display_name=name,
+                )
+        self.refresh()
+        return True
+
+    def reset_display_name(self) -> None:
+        """Reset the user's custom nickname back to default anonymous guest code."""
+        auth = self.online.get("auth") or {}
+        user_id = auth.get("user_id")
+        if not user_id:
+            self.online.pop("display_name", None)
+            self.online.pop("synced_display_name", None)
+            self.save()
+            self.refresh()
+            return
+
+        default_name = canonical_nickname(user_id)
+        self.online["display_name"] = default_name
+        self.online["synced_display_name"] = ""
+        self.save()
+
+        token = self._access_token()
+        if token:
+            def _upload():
+                try:
+                    self.client.upsert_profile(token, user_id, default_name)
+                    self.online["synced_display_name"] = default_name
+                except Exception:
+                    pass
+            self.executor.submit(_upload)
+
+            realtime = getattr(self, "realtime", None)
+            if realtime is not None and realtime.is_available():
+                current = now()
+                status = presence_status(self.tracker.status, self.tracker.last_input_at, current)
+                deck_name = shareable_deck_name(
+                    self.online.get("share_deck_name", True),
+                    self.tracker.current_deck_name,
+                    self.tracker.deck_opened_day,
+                    study_day(current, getattr(self.tracker, "time_zone", "Asia/Seoul")).isoformat(),
+                )
+                realtime.update_presence(
+                    status=status,
+                    current_deck_name=deck_name,
+                    display_name=default_name,
+                )
+        self.refresh()
+
 
     def _build_side_panel(self):
         self.panel = QDockWidget(self.t("스터디", "Study"), mw)
@@ -1133,8 +1226,15 @@ class Controller:
         sync_generation = self.identity_generation
         auth = dict(self.online["auth"])
         session_token = auth.get("access_token")
-        display_name = canonical_nickname(auth["user_id"])
-        update_name = self.online.get("display_name") != display_name
+        sanitize = globals().get("sanitize_display_name")
+        if sanitize is not None:
+            display_name = sanitize(
+                self.online.get("display_name"),
+                fallback_user_id=auth["user_id"],
+            )
+        else:
+            display_name = canonical_nickname(auth["user_id"])
+        update_name = self.online.get("synced_display_name") != display_name
         group = dict(self.online.get("group") or {})
         group_id = group.get("id")
         current = now()
@@ -1530,6 +1630,7 @@ class Controller:
                         acknowledged_payload, acknowledged_revision
                     )
                 self.online["display_name"] = display_name
+                self.online["synced_display_name"] = display_name
                 if deck_published:
                     self.online["published_deck"] = {
                         "user_id": auth["user_id"],

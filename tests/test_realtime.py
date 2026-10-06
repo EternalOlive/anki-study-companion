@@ -145,14 +145,55 @@ class RealtimeClientTests(TestCase):
         ]
 
         presences = {
-            "u1": {"status": "studying", "current_deck_name": "NewDeck"},
+            "u1": {"status": "studying", "current_deck_name": "NewDeck", "display_name": "CoolUser"},
         }
 
         changed = apply_presence_to_members(members, presences, "2026-10-06T22:00:00")
         self.assertTrue(changed)
         self.assertEqual(members[0]["status"], "studying")
         self.assertEqual(members[0]["current_deck_name"], "NewDeck")
+        self.assertEqual(members[0]["display_name"], "CoolUser")
         self.assertEqual(members[0]["updated_at"], "2026-10-06T22:00:00")
         # u2 was not in presences
         self.assertEqual(members[1]["status"], "paused")
         self.assertEqual(members[1]["current_deck_name"], "OldDeck")
+
+    def test_apply_presence_sanitizes_malicious_display_name(self):
+        from study_companion.realtime import apply_presence_to_members
+        from study_companion.nicknames import canonical_nickname
+
+        members = [
+            {"user_id": "u1", "status": "online", "display_name": "OldName"},
+        ]
+        presences = {
+            "u1": {"display_name": "<script>alert('xss')</script>"},
+        }
+        changed = apply_presence_to_members(members, presences, "2026-10-06T22:00:00")
+        self.assertTrue(changed)
+        self.assertEqual(members[0]["display_name"], canonical_nickname("u1"))
+
+    def test_member_state_broadcast_sanitizes_display_name(self):
+        from study_companion.nicknames import canonical_nickname
+
+        client = RealtimeClient(apikey="test-key")
+        client.user_id = "my-user"
+
+        store = {}
+        client.presence_changed.connect(lambda p: store.update(p))
+
+        msg = {
+            "event": "broadcast",
+            "topic": "realtime:room:g1",
+            "payload": {
+                "event": "member_state",
+                "payload": {
+                    "user_id": "peer-1",
+                    "status": "online",
+                    "display_name": "<img src=x onerror=alert(1)>",
+                },
+            },
+        }
+        client._on_message(json.dumps(msg))
+        self.assertIn("peer-1", store)
+        self.assertEqual(store["peer-1"]["display_name"], canonical_nickname("peer-1"))
+

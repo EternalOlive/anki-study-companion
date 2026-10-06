@@ -12,8 +12,23 @@
 - `20261006_room_management.sql`: 방 관리 RPC 4종(`update_room_timezone`, `transfer_room_ownership`, `kick_room_member`, `cleanup_inactive_members`)을 추가했다. 방장만 호출 가능하며 JWT 인증이 필요하다.
 - `20261006_public_rooms.sql`: `study_groups` 테이블에 `is_public` 플래그 및 인덱스를 추가하고, 공개 방 목록을 필터링·추천 정렬하는 `list_public_study_groups(user_timezone)` RPC와 `create_study_group` 공개 플래그 파라미터를 추가했다.
 - `20261006_ten_minute_timeline.sql`: `get_group_activity_timeline` RPC의 활동 집계 단위를 기존 15분(하루 96칸)에서 10분(하루 144칸)으로 단축했다.
+- `20261006_display_name_validation.sql`: `public.profiles`의 `display_name`에 영문/숫자 2~16자(`^[a-zA-Z0-9]{2,16}$`) 또는 기본 익명 코드(`^[2-9A-HJ-NP-Z]{3}-[2-9A-HJ-NP-Z]{3}$`) 형식 제약 조건(`profiles_display_name_format_check`)을 추가했다.
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
+
+## 사용자 지정 닉네임 기능 및 보안 검증 강화 — 2026-10-06
+
+- **사용자 지정 영문/숫자 닉네임 지원**:
+  - 설정 창 계정 탭에 '내 닉네임' 설정 섹션(입력 필드, [변경], [기본 코드로] 리셋 버튼) 추가.
+  - 2~16자의 영문 대소문자 및 숫자(`[a-zA-Z0-9]`)만 허용하며, UI 단에서 `QRegularExpressionValidator`를 통해 공백/특수문자/한글 입력을 원천 방지.
+- **서버 및 피어 데이터 보안 검증 & Sanitization (`study_companion/nicknames.py`)**:
+  - 서버(PostgREST) 및 WebSocket 피어 브로드캐스트/Presence로부터 수신되는 모든 `display_name`을 철저히 검증.
+  - 형식에 맞지 않거나 XSS/스크립트/인젝션 시도 문자열이 감지될 경우, 안전하게 사용자의 기본 익명 코드(`canonical_nickname(user_id)`)로 자동 fallback하여 보안 사고 방지.
+- **서버 DB 제약 조건 배포 (`supabase/migrations/20261006_display_name_validation.sql`)**:
+  - `public.profiles` 테이블에 `profiles_display_name_format_check` CHECK 제약 조건을 추가하여 DB 수준에서도 비인가 문자열 저장을 차단.
+- **프로필 동기화 및 타 기기 로그인 유지 로직 개선**:
+  - 백그라운드 주기 동기화 시 커스텀 닉네임이 익명 코드로 덮어써지지 않도록 수정 (`synced_display_name` 추적).
+  - 다른 PC 로그인 및 복구 시 서버에 저장되어 있던 기존 닉네임을 조회하여 안전하게 복원 유지.
 
 ## Supabase Realtime 웹소켓 도입 (저지연 피어 동기화 및 DB 부하 절감) — 2026-10-06
 

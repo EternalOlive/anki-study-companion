@@ -38,7 +38,11 @@ from aqt.qt import (
 )
 
 from . import i18n
-from .nicknames import canonical_nickname
+from .nicknames import (
+    canonical_nickname,
+    sanitize_display_name,
+    validate_display_name,
+)
 from .online import SupabaseError
 from .study_day import DAY_START_HOUR, DEFAULT_TIME_ZONE, room_time_zone
 from .ux_services import (
@@ -426,16 +430,53 @@ class SettingsDialog(QDialog):
         self.account_summary = self._note("")
         self.account_summary.setTextFormat(Qt.TextFormat.PlainText)
         account_tab_layout.addWidget(self.account_summary)
+        nickname_group, nickname_layout = self._section(
+            self.account_tab_content, self._t("내 닉네임", "Nickname")
+        )
+        nickname_row = QHBoxLayout()
+        self.nickname_edit = QLineEdit(nickname_group)
+        self.nickname_edit.setObjectName("nicknameEdit")
+        self.nickname_edit.setMaxLength(16)
+        self.nickname_edit.setPlaceholderText(self._t("영문/숫자 2~16자", "2–16 alphanumeric"))
+        try:
+            from aqt.qt import QRegularExpression, QRegularExpressionValidator
+            self.nickname_edit.setValidator(
+                QRegularExpressionValidator(QRegularExpression(r"^[a-zA-Z0-9]{0,16}$"), self.nickname_edit)
+            )
+        except Exception:
+            pass
+
+        self.save_nickname_button = QPushButton(
+            self._t("변경", "Save"), nickname_group
+        )
+        self.save_nickname_button.setObjectName("saveNicknameButton")
+        self.save_nickname_button.clicked.connect(self._save_nickname)
+
+        self.reset_nickname_button = QPushButton(
+            self._t("기본 코드로", "Reset"), nickname_group
+        )
+        self.reset_nickname_button.setObjectName("resetNicknameButton")
+        self.reset_nickname_button.clicked.connect(self._reset_nickname)
+
+        nickname_row.addWidget(self.nickname_edit)
+        nickname_row.addWidget(self.save_nickname_button)
+        nickname_row.addWidget(self.reset_nickname_button)
+        nickname_layout.addLayout(nickname_row)
+
         account_row = QHBoxLayout()
-        self.display_code_label = QLabel("—", self.account_tab_content)
+        self.display_code_label = QLabel("—", nickname_group)
         self.display_code_label.setObjectName("displayCode")
         self.account_code = self.display_code_label
         account_row.addWidget(
-            QLabel(self._t("내 코드", "My code"), self.account_tab_content)
+            QLabel(self._t("현재 표시:", "Current:"), nickname_group)
         )
         account_row.addWidget(self.display_code_label)
         account_row.addStretch(1)
-        account_tab_layout.addLayout(account_row)
+        nickname_layout.addLayout(account_row)
+
+        self.nickname_error = self._error_label()
+        nickname_layout.addWidget(self.nickname_error)
+        account_tab_layout.addWidget(nickname_group)
         self.account_error = self._error_label()
         account_tab_layout.addWidget(self.account_error)
         self.link_email_button = QPushButton(
@@ -777,13 +818,55 @@ class SettingsDialog(QDialog):
         return page
 
     def _display_code(self):
+        user_id = (self.controller.online.get("auth") or {}).get("user_id")
         code = self.controller.online.get("display_name")
         if code:
-            return str(code)
-        user_id = (self.controller.online.get("auth") or {}).get("user_id")
+            return sanitize_display_name(code, user_id)
         if user_id:
             return canonical_nickname(user_id)
         return "—"
+
+    def _save_nickname(self):
+        text = self.nickname_edit.text().strip()
+        if not validate_display_name(text):
+            self.nickname_error.setText(
+                self._t(
+                    "닉네임은 영문과 숫자 2~16자만 사용할 수 있습니다.",
+                    "Nickname must be 2–16 alphanumeric characters.",
+                )
+            )
+            self.nickname_error.setVisible(True)
+            return
+
+        setter = getattr(self.controller, "set_display_name", None)
+        if callable(setter):
+            setter(text)
+        else:
+            self.controller.online["display_name"] = text
+            if callable(getattr(self.controller, "save", None)):
+                self.controller.save()
+            if callable(getattr(self.controller, "refresh", None)):
+                self.controller.refresh()
+
+        self.nickname_error.setVisible(False)
+        self.display_code_label.setText(self._display_code())
+        self.account_code.setText(self._display_code())
+
+    def _reset_nickname(self):
+        resetter = getattr(self.controller, "reset_display_name", None)
+        if callable(resetter):
+            resetter()
+        else:
+            self.controller.online.pop("display_name", None)
+            if callable(getattr(self.controller, "save", None)):
+                self.controller.save()
+            if callable(getattr(self.controller, "refresh", None)):
+                self.controller.refresh()
+
+        self.nickname_edit.clear()
+        self.nickname_error.setVisible(False)
+        self.display_code_label.setText(self._display_code())
+        self.account_code.setText(self._display_code())
 
     def refresh_from_controller(self):
         signature = self._current_controller_signature()
@@ -979,6 +1062,12 @@ class SettingsDialog(QDialog):
             self._render_placeholder(self.home_public_layout, self.home_public_body)
 
     def _refresh_account_page(self):
+        if hasattr(self, "nickname_edit") and not self.nickname_edit.hasFocus():
+            raw_name = self.controller.online.get("display_name") or ""
+            if validate_display_name(raw_name):
+                self.nickname_edit.setText(raw_name)
+            else:
+                self.nickname_edit.clear()
         kind = self.controller.online.get("account_kind")
         email = self.controller.online.get("email")
         username = self.controller.online.get("username")
@@ -2413,10 +2502,20 @@ class SettingsDialog(QDialog):
                     "로그인 응답의 아이디가 일치하지 않습니다.",
                     "The username in the sign-in response did not match.",
                 ))
-            name = canonical_nickname(user_id)
-            self.controller.client.upsert_profile(
-                result["access_token"], user_id, name
-            )
+            profile = None
+            try:
+                fetcher = getattr(self.controller.client, "fetch_profile", None)
+                if callable(fetcher):
+                    profile = fetcher(result["access_token"], user_id)
+            except Exception:
+                pass
+            if profile and profile.get("display_name"):
+                name = sanitize_display_name(profile.get("display_name"), user_id)
+            else:
+                name = canonical_nickname(user_id)
+                self.controller.client.upsert_profile(
+                    result["access_token"], user_id, name
+                )
             groups = self.controller.client.list_groups(result["access_token"], user_id)
             return result, groups, name
 
@@ -2530,10 +2629,20 @@ class SettingsDialog(QDialog):
                     "복구 응답의 아이디가 일치하지 않습니다.",
                     "The username in the recovery response did not match.",
                 ))
-            name = canonical_nickname(user_id)
-            self.controller.client.upsert_profile(
-                session["access_token"], user_id, name
-            )
+            profile = None
+            try:
+                fetcher = getattr(self.controller.client, "fetch_profile", None)
+                if callable(fetcher):
+                    profile = fetcher(session["access_token"], user_id)
+            except Exception:
+                pass
+            if profile and profile.get("display_name"):
+                name = sanitize_display_name(profile.get("display_name"), user_id)
+            else:
+                name = canonical_nickname(user_id)
+                self.controller.client.upsert_profile(
+                    session["access_token"], user_id, name
+                )
             groups = self.controller.client.list_groups(session["access_token"], user_id)
             return session, groups, name
 

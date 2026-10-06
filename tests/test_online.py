@@ -163,7 +163,7 @@ class SupabaseClientTests(unittest.TestCase):
 
     def test_profile_group_and_stats_writes_are_authenticated_upserts(self):
         opener = FakeOpener([
-            [{"id": "u1", "display_name": "윤"}],
+            [{"id": "u1", "display_name": "Yoon"}],
             [{"group_id": "g1", "invite_code": "ABC"}],
             {"ok": True, "group_id": "g1"},
             None,
@@ -171,13 +171,13 @@ class SupabaseClientTests(unittest.TestCase):
         ])
         client = SupabaseClient(opener=opener)
 
-        profile = client.upsert_profile("access", "u1", "윤")
+        profile = client.upsert_profile("access", "u1", "Yoon")
         group = client.create_group("access", "친구들")
         joined = client.join_group("access", " abc ")
         client.leave_group("access", "g1")
         stats = client.upsert_daily_stats("access", [{"group_id": "g1", "user_id": "u1"}])
 
-        self.assertEqual(profile["display_name"], "윤")
+        self.assertEqual(profile["display_name"], "Yoon")
         self.assertEqual(group["invite_code"], "ABC")
         self.assertEqual(group["id"], "g1")
         self.assertEqual(group["name"], "친구들")
@@ -186,7 +186,7 @@ class SupabaseClientTests(unittest.TestCase):
         requests = [call[0] for call in opener.calls]
         for request in requests:
             self.assertEqual(headers_of(request)["authorization"], "Bearer access")
-        self.assertEqual(body_of(requests[0]), {"id": "u1", "display_name": "윤"})
+        self.assertEqual(body_of(requests[0]), {"id": "u1", "display_name": "Yoon"})
         self.assertIn("resolution=merge-duplicates", headers_of(requests[0])["prefer"])
         self.assertEqual(body_of(requests[1]), {"group_name": "친구들", "room_timezone": "Asia/Seoul"})
         self.assertEqual(group["time_zone"], "Asia/Seoul")
@@ -270,7 +270,7 @@ class SupabaseClientTests(unittest.TestCase):
                 {"group_id": "g1", "user_id": "u1", "study_day": "2026-09-30", "answer_count": 10},
                 {"group_id": "g1", "user_id": "u2", "study_day": "2026-09-30", "answer_count": 7},
             ],
-            [{"id": "u1", "display_name": "윤"}, {"id": "u2", "display_name": "친구"}],
+            [{"id": "u1", "display_name": "Yoon"}, {"id": "u2", "display_name": "Friend"}],
             [{"user_id": "u2", "current_deck_name": "English::Words"}],
             [{"user_id": "u1", "study_day": "2026-09-30",
               "activity_known": True,
@@ -282,7 +282,7 @@ class SupabaseClientTests(unittest.TestCase):
 
         rows = client.fetch_group_today("access", "g1", "2026-09-30")
 
-        self.assertEqual([row["display_name"] for row in rows], ["윤", "친구"])
+        self.assertEqual([row["display_name"] for row in rows], ["Yoon", "Friend"])
         self.assertEqual(rows[1]["current_deck_name"], "English::Words")
         self.assertNotIn("current_deck_name", rows[0])
         self.assertTrue(rows[0]["activity_known"])
@@ -305,12 +305,12 @@ class SupabaseClientTests(unittest.TestCase):
         opener = FakeOpener([
             [{"user_id": "u1"}],
             [],
-            [{"id": "u1", "display_name": "윤"}],
+            [{"id": "u1", "display_name": "Yoon"}],
             [],
             [],
         ])
         rows = SupabaseClient(opener=opener).fetch_group_today("access", "g1", "2026-09-30")
-        self.assertEqual(rows[0]["display_name"], "윤")
+        self.assertEqual(rows[0]["display_name"], "Yoon")
         self.assertEqual(rows[0]["answer_count"], 0)
         self.assertEqual(rows[0]["status"], "stopped")
         self.assertFalse(rows[0]["activity_known"])
@@ -391,6 +391,31 @@ class SupabaseClientTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status, 400)
         self.assertNotIn("wrong-password", str(raised.exception))
+
+    def test_fetch_profile_queries_profile_endpoint(self):
+        opener = FakeOpener([[{"id": "u1", "display_name": "Alex"}]])
+        client = SupabaseClient(opener=opener)
+        profile = client.fetch_profile("access", "u1")
+        self.assertEqual(profile, {"id": "u1", "display_name": "Alex"})
+        query = parse_qs(urlparse(opener.calls[0][0].full_url).query)
+        self.assertEqual(query["id"], ["eq.u1"])
+
+    def test_fetch_group_today_sanitizes_malformed_peer_names(self):
+        from study_companion.nicknames import canonical_nickname
+        opener = FakeOpener([
+            [{"user_id": "u1"}, {"user_id": "u2"}],
+            [],
+            [
+                {"id": "u1", "display_name": "<script>alert(1)</script>"},
+                {"id": "u2", "display_name": "한국어닉네임"},
+            ],
+            [],
+            [],
+        ])
+        client = SupabaseClient(opener=opener)
+        rows = client.fetch_group_today("access", "g1", "2026-09-30")
+        self.assertEqual(rows[0]["display_name"], canonical_nickname("u1"))
+        self.assertEqual(rows[1]["display_name"], canonical_nickname("u2"))
 
 
 if __name__ == "__main__":

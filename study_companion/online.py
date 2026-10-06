@@ -12,6 +12,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from .nicknames import sanitize_display_name
+
 
 DEFAULT_URL = "https://uvrnsdknkivtclzlfjxx.supabase.co"
 DEFAULT_KEY = (
@@ -344,15 +346,27 @@ class SupabaseClient:
     def update_user(self, token: str, **attributes: Any) -> dict[str, Any]:
         return self._request("PUT", "/auth/v1/user", token=token, body=attributes)
 
+    def fetch_profile(
+        self, token: str, user_id: str
+    ) -> dict[str, Any] | None:
+        rows = self._request(
+            "GET",
+            "/rest/v1/profiles",
+            token=token,
+            query={"id": f"eq.{user_id}", "select": "id,display_name"},
+        )
+        return self._first(rows)
+
     def upsert_profile(
         self, token: str, user_id: str, display_name: str
     ) -> dict[str, Any] | None:
+        sanitized = sanitize_display_name(display_name, fallback_user_id=user_id)
         result = self._request(
             "POST",
             "/rest/v1/profiles",
             token=token,
             query={"on_conflict": "id"},
-            body={"id": user_id, "display_name": display_name},
+            body={"id": user_id, "display_name": sanitized},
             prefer="resolution=merge-duplicates,return=representation",
         )
         return self._first(result)
@@ -464,7 +478,7 @@ class SupabaseClient:
                 },
             ) or []
         names = {
-            str(row.get("id")): row.get("display_name")
+            str(row.get("id")): sanitize_display_name(row.get("display_name"), str(row.get("id")))
             for row in profiles
             if row.get("id")
         }
@@ -737,7 +751,11 @@ class SupabaseClient:
                     "id": f"in.({','.join(user_ids)})",
                 },
             ) or []
-            names = {row["id"]: row["display_name"] for row in profiles}
+            names = {
+                str(row["id"]): sanitize_display_name(row.get("display_name"), str(row["id"]))
+                for row in profiles
+                if isinstance(row, dict) and "id" in row
+            }
 
         try:
             decks = self._request(
