@@ -1,0 +1,58 @@
+name: Release Anki Add-on
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build .ankiaddon
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          OUTPUT="study_companion-${VERSION}.ankiaddon"
+
+          cd study_companion
+
+          zip -r "../${OUTPUT}" . \
+            -x "__pycache__/*" \
+               "*.pyc" \
+               "*.pyo" \
+               "__pycache__.zip"
+
+          cd ..
+
+          echo "OUTPUT=${OUTPUT}" >> "$GITHUB_ENV"
+
+      - name: Check package contents
+        shell: bash
+        run: |
+          unzip -l "$OUTPUT"
+
+          unzip -l "$OUTPUT" | grep "__init__.py"
+          unzip -l "$OUTPUT" | grep "manifest.json"
+
+          if unzip -l "$OUTPUT" | grep -q "__pycache__"; then
+            echo "ERROR: __pycache__ found in package"
+            exit 1
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "$OUTPUT" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
