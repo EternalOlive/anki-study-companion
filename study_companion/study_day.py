@@ -125,6 +125,13 @@ def split_interval(
         cursor = segment_end
 
 
+def ten_minute_slot(moment: datetime, time_zone: str = DEFAULT_TIME_ZONE) -> int:
+    """Return the room-wall 10-minute slot, where slot zero is 04:00."""
+    local = room_datetime(moment, time_zone)
+    minutes = (local.hour * 60 + local.minute - DAY_START_HOUR * 60) % (24 * 60)
+    return minutes // 10
+
+
 def quarter_hour_slot(moment: datetime, time_zone: str = DEFAULT_TIME_ZONE) -> int:
     """Return the room-wall 15-minute slot, where slot zero is 04:00."""
     local = room_datetime(moment, time_zone)

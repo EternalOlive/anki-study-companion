@@ -159,7 +159,7 @@ class SlotLeaderTests(TestCase):
         members = [
             member("a", [(5, 9)], known=False),
             {"user_id": "b", "activity_known": True,
-             "activity_buckets": [{"slot": 96, "answer_count": 1}, {"slot": "x"}, None,
+             "activity_buckets": [{"slot": 144, "answer_count": 1}, {"slot": "x"}, None,
                                   {"slot": 7, "answer_count": 2}]},
         ]
         self.assertEqual(slot_rankings(members), {7: [("b", 2)]})

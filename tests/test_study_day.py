@@ -6,6 +6,7 @@ from study_companion.study_day import (
     quarter_hour_slot,
     split_interval,
     study_day,
+    ten_minute_slot,
 )
 
 
@@ -29,6 +30,8 @@ class StudyDayTests(TestCase):
         self.assertEqual(end, datetime(2026, 10, 4, 19, 0, tzinfo=timezone.utc))
         self.assertEqual(quarter_hour_slot(start), 0)
         self.assertEqual(quarter_hour_slot(end - timedelta(minutes=1)), 95)
+        self.assertEqual(ten_minute_slot(start), 0)
+        self.assertEqual(ten_minute_slot(end - timedelta(minutes=1)), 143)
 
     def test_interval_is_split_at_room_boundary(self):
         start = datetime(2026, 10, 4, 3, 59, 50, tzinfo=KST)

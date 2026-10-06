@@ -309,7 +309,7 @@ def main() -> int:
     from study_companion.room_activity import FRIEND_COLORS, TIE_COLOR, slot_leader
     room_timeline = panel.room_timeline
     assert panel.room_activity.isVisible()
-    assert panel.room_activity_title.text() == "방 시간대 · 15분 1등"
+    assert panel.room_activity_title.text() == "방 시간대 · 10분 1등"
     assert slot_leader(room_timeline.rankings[30]) is None
     assert slot_leader(room_timeline.rankings[40]) == "self"
     assert slot_leader(room_timeline.rankings[62]) == "friend-a"
@@ -318,21 +318,21 @@ def main() -> int:
     assert room_timeline.colors["self"] == panel.my_color()
     assert TIE_COLOR not in room_timeline.colors.values()
     assert room_timeline.selected_slot == 62
-    assert panel.room_timeline_detail.text() == "19:30–19:45 · 1등 K7M-2RX 7회"
-    assert room_timeline.describe(30) == "11:30–11:45 · 1등 K7M-2RX 4회 · 1등 나 4회"
+    assert panel.room_timeline_detail.text() == "14:20–14:30 · 1등 K7M-2RX 7회"
+    assert room_timeline.describe(30) == "09:00–09:10 · 1등 K7M-2RX 4회 · 1등 나 4회"
     assert "1등&nbsp;2번" in panel.room_timeline_legend.text()
     assert "K7M-2RX 1등 2번" in panel.room_timeline_legend.accessibleName()
     assert "나 1등 1번" in panel.room_timeline_legend.accessibleName()
     assert "T4N-8WA" not in panel.room_timeline_legend.accessibleName()
-    assert "19:30–19:45" in room_timeline.accessibleName()
-    assert "19:30–19:45" not in room_timeline.toolTip()
+    assert "14:20–14:30" in room_timeline.accessibleName()
+    assert "14:20–14:30" not in room_timeline.toolTip()
     assert first_row.details.isVisible()
     assert first_row.activity_timeline.isVisible()
-    assert "11:30–11:45" in first_row.activity_timeline.accessibleName()
+    assert "09:00–09:10" in first_row.activity_timeline.accessibleName()
     assert "Asia/Seoul · 04:00" in first_row.activity_timeline.accessibleName()
     assert "4회" in first_row.activity_timeline.accessibleName()
     # Hovering an empty area must not show the full per-bin accessible list.
-    assert "11:30–11:45" not in first_row.activity_timeline.toolTip()
+    assert "09:00–09:10" not in first_row.activity_timeline.toolTip()
     from PyQt6.QtCore import Qt, QPoint
     from PyQt6.QtTest import QTest
     timeline = first_row.activity_timeline
@@ -340,9 +340,9 @@ def main() -> int:
     assert timeline.is_today
     QTest.keyClick(room_timeline, Qt.Key.Key_Left)
     assert room_timeline.selected_slot == 40
-    assert panel.room_timeline_detail.text() == "14:00–14:15 · 1등 나 6회"
+    assert panel.room_timeline_detail.text() == "10:40–10:50 · 1등 나 6회"
     QTest.mouseClick(room_timeline, Qt.MouseButton.LeftButton,
-                     pos=QPoint(1 + round(30.5 * (room_timeline.width() - 2) / 96), 8))
+                     pos=QPoint(1 + round(30.5 * (room_timeline.width() - 2) / 144), 8))
     assert room_timeline.selected_slot == 30
     assert "1등 나 4회" in panel.room_timeline_detail.text()
     QTest.keyClick(timeline, Qt.Key.Key_Left)
@@ -350,9 +350,9 @@ def main() -> int:
     timeline.update_activity(first_row.member)
     assert timeline.selected_slot == 31
     QTest.mouseClick(timeline, Qt.MouseButton.LeftButton,
-                     pos=QPoint(1 + round(30.5 * (timeline.width() - 2) / 96), 35))
+                     pos=QPoint(1 + round(30.5 * (timeline.width() - 2) / 144), 35))
     assert timeline.selected_slot == 30
-    assert "11:30–11:45" in timeline.accessibleDescription()
+    assert "09:00–09:10" in timeline.accessibleDescription()
     saved_buckets = dict(timeline.buckets)
     timeline.update_activity(dict(first_row.member, activity_error=True,
                                   activity_known=False, activity_buckets=[]))
@@ -371,7 +371,7 @@ def main() -> int:
     current_friend = first_row.member
     first_row.update_member(dict(current_friend, study_day=yesterday))
     assert "시간대 기록 없음" in first_row.activity_timeline.accessibleName()
-    assert "11:30–11:45" not in first_row.activity_timeline.accessibleName()
+    assert "09:00–09:10" not in first_row.activity_timeline.accessibleName()
     first_row.update_member(current_friend)
     assert "시간대 기록 없음" in panel.member_rows["friend-b"].activity_timeline.accessibleName()
     assert panel.history_body.isVisible()
@@ -447,7 +447,7 @@ def main() -> int:
     assert not panel.own_activity_timeline.isVisible()
     panel.own_activity_toggle.click()
     assert panel.own_activity_timeline.isVisible()
-    assert "11:30–11:45" in panel.own_activity_timeline.accessibleName()
+    assert "09:00–09:10" in panel.own_activity_timeline.accessibleName()
     mine["activity_error"] = True
     panel.refresh()
     assert "동기화 지연" in panel.own_activity_timeline.accessibleName()
@@ -583,7 +583,7 @@ def main() -> int:
     assert panel.weekly_title.text() == "Recent 7 days"
     assert "today in progress" in panel.weekly_chart.day_description(6)
     assert panel.room_presence.text() == "3 online · including you"
-    assert panel.room_activity_title.text() == "Room timeline · top per 15 min"
+    assert panel.room_activity_title.text() == "Room timeline · top per 10 min"
     assert "#1 K7M-2RX 7" in panel.room_timeline.describe(62)
     assert "1st&nbsp;×2" in panel.room_timeline_legend.text()
     _assert_unclipped(panel)

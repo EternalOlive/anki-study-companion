@@ -11,8 +11,24 @@
 - `20261004_leave_study_group_idempotent.sql`: 이미 내보내졌거나 나간 사용자의 반복 탈퇴 요청을 성공으로 처리한다. 다른 멤버·차단 기록은 변경하지 않는다.
 - `20261006_room_management.sql`: 방 관리 RPC 4종(`update_room_timezone`, `transfer_room_ownership`, `kick_room_member`, `cleanup_inactive_members`)을 추가했다. 방장만 호출 가능하며 JWT 인증이 필요하다.
 - `20261006_public_rooms.sql`: `study_groups` 테이블에 `is_public` 플래그 및 인덱스를 추가하고, 공개 방 목록을 필터링·추천 정렬하는 `list_public_study_groups(user_timezone)` RPC와 `create_study_group` 공개 플래그 파라미터를 추가했다.
+- `20261006_ten_minute_timeline.sql`: `get_group_activity_timeline` RPC의 활동 집계 단위를 기존 15분(하루 96칸)에서 10분(하루 144칸)으로 단축했다.
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
+
+## 활동 타임라인 10분 구간 전환 — 2026-10-06
+
+- **시간대 1등 및 활동 구간 간격 10분 단축**:
+  - 타임라인 버킷을 기존 15분 단위(하루 96개 슬롯)에서 10분 단위(하루 144개 슬롯)로 단축.
+  - 방 시간대 띠 명칭을 `방 시간대 · 10분 1등` (`Room timeline · top per 10 min`)으로 변경.
+  - 개별 멤버 활동 시간대 서브타이틀 및 최대 높이 스케일을 `10:00` (`답변 시간 / 10분 구간`)으로 갱신.
+  - X축 눈금 레이블 슬롯 매핑을 144개 슬롯(04시=0, 10시=36, 16시=72, 22시=108, 04시=144)으로 조정.
+- **서버 RPC 마이그레이션 (`supabase/migrations/20261006_ten_minute_timeline.sql`)**:
+  - `get_group_activity_timeline` RPC에서 슬롯 계산을 10분 간격(`mod(hour * 6 + floor(minute / 10) - day_start_hour * 6 + 144, 144)`)으로 수정.
+  - 운영 Supabase DB에 migration 배포 완료.
+- **클라이언트 및 단위 테스트**:
+  - `study_companion/room_activity.py`의 `SLOTS_PER_DAY = 144` 갱신.
+  - `study_companion/study_day.py`에 `ten_minute_slot` 헬퍼 함수 추가 (기존 `quarter_hour_slot` 호환 유지).
+  - 단위 테스트(`test_room_activity.py`, `test_study_day.py`) 및 Qt6 네이티브 스모크 테스트(`native_panel_smoke.py`) 갱신 및 250개 전 항목 통과.
 
 ## 공개 스터디방 및 방 관리 — 2026-10-06
 

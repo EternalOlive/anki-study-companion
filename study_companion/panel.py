@@ -69,8 +69,8 @@ def _set_font(widget: QWidget, *, scale: float = 1.0, bold: bool = False) -> Non
 
 
 def _slot_period(slot: int) -> str:
-    start = (DAY_START_HOUR * 60 + slot * 15) % (24 * 60)
-    end = (start + 15) % (24 * 60)
+    start = (DAY_START_HOUR * 60 + slot * 10) % (24 * 60)
+    end = (start + 10) % (24 * 60)
     return f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
 
 
@@ -93,11 +93,11 @@ def _draw_now_line(painter: QPainter, widget: QWidget, panel: "StudyPanel", top:
 
 def _draw_axis_labels(painter: QPainter, widget: QWidget, label_y: int) -> None:
     metrics = painter.fontMetrics()
-    labels = ((0, "04"), (24, "10"), (48, "16"), (72, "22"), (96, "04"))
+    labels = ((0, "04"), (36, "10"), (72, "16"), (108, "22"), (144, "04"))
     width = max(1, widget.width() - 2)
     for slot, label in labels:
-        x = 1 + round(slot * width / 96)
-        if slot == 96:
+        x = 1 + round(slot * width / 144)
+        if slot == 144:
             x -= metrics.horizontalAdvance(label)
         elif slot:
             x -= metrics.horizontalAdvance(label) // 2
@@ -356,7 +356,7 @@ class ActivityTimeline(QWidget):
                     time_ms = max(0, int(bucket.get("time_ms") or 0))
                 except (AttributeError, TypeError, ValueError):
                     continue
-                if 0 <= slot < 96 and (answers or time_ms):
+                if 0 <= slot < 144 and (answers or time_ms):
                     self.buckets[slot] = {
                         "answer_count": answers,
                         "time_ms": time_ms,
@@ -406,8 +406,8 @@ class ActivityTimeline(QWidget):
 
     def _description(self, slot: int) -> str:
         bucket = self.buckets[slot]
-        start_minutes = (DAY_START_HOUR * 60 + slot * 15) % (24 * 60)
-        end_minutes = (start_minutes + 15) % (24 * 60)
+        start_minutes = (DAY_START_HOUR * 60 + slot * 10) % (24 * 60)
+        end_minutes = (start_minutes + 10) % (24 * 60)
         start = f"{start_minutes // 60:02d}:{start_minutes % 60:02d}"
         end = f"{end_minutes // 60:02d}:{end_minutes % 60:02d}"
         answers = bucket["answer_count"]
@@ -422,7 +422,7 @@ class ActivityTimeline(QWidget):
         left, right = 1, max(2, self.width() - 1)
         if x < left or x >= right:
             return None
-        return min(95, max(0, int((x - left) * 96 / max(1, right - left))))
+        return min(143, max(0, int((x - left) * 144 / max(1, right - left))))
 
     def mouseMoveEvent(self, event) -> None:
         slot = self._slot_at(int(event.position().x()))
@@ -485,15 +485,18 @@ class ActivityTimeline(QWidget):
         bar_space = max(10, baseline_y - bar_top)
         if self.known and self.buckets:
             painter.setPen(QPen(muted, 1))
-            painter.drawText(1, metrics.ascent() + 1, self.panel.tr("답변 시간 / 15분 구간", "Answer time / 15-min bin"))
-            scale = "15:00"
+            painter.drawText(1, metrics.ascent() + 1, self.panel.tr(
+                "답변 시간 / 10분 구간",
+                "Answer time / 10-min bin",
+            ))
+            scale = "10:00"
             painter.drawText(self.width() - metrics.horizontalAdvance(scale) - 1, metrics.ascent() + 1, scale)
             painter.drawLine(1, baseline_y, max(1, self.width() - 2), baseline_y)
             width = max(1, self.width() - 2)
             for slot in self.buckets:
-                x1 = 1 + round(slot * width / 96)
-                x2 = 1 + round((slot + 1) * width / 96)
-                height = max(2, round(bar_space * min(1, self.buckets[slot]["time_ms"] / 900000)))
+                x1 = 1 + round(slot * width / 144)
+                x2 = 1 + round((slot + 1) * width / 144)
+                height = max(2, round(bar_space * min(1, self.buckets[slot]["time_ms"] / 600000)))
                 selected = slot == self.selected_slot
                 if selected:
                     shade = self.palette().color(QPalette.ColorRole.WindowText)
@@ -507,8 +510,8 @@ class ActivityTimeline(QWidget):
             if self.selected_slot in self.buckets:
                 slot = self.selected_slot
                 bucket = self.buckets[slot]
-                start = (DAY_START_HOUR * 60 + slot * 15) % (24 * 60)
-                end = (start + 15) % (24 * 60)
+                start = (DAY_START_HOUR * 60 + slot * 10) % (24 * 60)
+                end = (start + 10) % (24 * 60)
                 period = f"{start // 60:02d}:{start % 60:02d}–{end // 60:02d}:{end % 60:02d}"
                 duration = self.panel.format_clock(round(bucket["time_ms"] / 1000))
                 answers = bucket["answer_count"]
@@ -540,7 +543,7 @@ class ActivityTimeline(QWidget):
 
 
 class RoomTimeline(QWidget):
-    """Room-wide 04→04 strip; each 15-minute slot takes its single leader's color."""
+    """Room-wide 04→04 strip; each 10-minute slot takes its single leader's color."""
 
     def __init__(self, panel: "StudyPanel", parent=None):
         super().__init__(parent)
@@ -571,7 +574,10 @@ class RoomTimeline(QWidget):
             self.selected_slot = max(self.rankings, default=None)
         label_height = QFontMetrics(self._label_font()).height()
         self.setFixedHeight(self._strip_height() + 7 + label_height + 2)
-        title = self.panel.tr("방 시간대 · 15분 1등", "Room timeline · top per 15 min")
+        title = self.panel.tr(
+            "방 시간대 · 10분 1등",
+            "Room timeline · top per 10 min",
+        )
         if self.rankings:
             summary = title + ": " + "; ".join(
                 self.describe(slot) for slot in sorted(self.rankings)
@@ -605,7 +611,7 @@ class RoomTimeline(QWidget):
         left, right = 1, max(2, self.width() - 1)
         if x < left or x >= right:
             return None
-        return min(95, max(0, int((x - left) * 96 / max(1, right - left))))
+        return min(143, max(0, int((x - left) * 144 / max(1, right - left))))
 
     def mouseMoveEvent(self, event) -> None:
         slot = self._slot_at(int(event.position().x()))
@@ -658,14 +664,14 @@ class RoomTimeline(QWidget):
         width = max(1, self.width() - 2)
         painter.fillRect(1, strip_top, width, strip_height, track)
         for slot, ranking in self.rankings.items():
-            x1 = 1 + round(slot * width / 96)
-            x2 = 1 + round((slot + 1) * width / 96)
+            x1 = 1 + round(slot * width / 144)
+            x2 = 1 + round((slot + 1) * width / 144)
             leader = slot_leader(ranking)
             color = QColor(self.colors.get(leader, TIE_COLOR) if leader else TIE_COLOR)
             painter.fillRect(x1, strip_top, max(1, x2 - x1), strip_height, color)
         if self.selected_slot in self.rankings:
-            x1 = 1 + round(self.selected_slot * width / 96)
-            x2 = 1 + round((self.selected_slot + 1) * width / 96)
+            x1 = 1 + round(self.selected_slot * width / 144)
+            x2 = 1 + round((self.selected_slot + 1) * width / 144)
             painter.fillRect(x1 - 1, strip_bottom + 1, max(3, x2 - x1 + 2), 2, foreground)
         _draw_now_line(painter, self, self.panel, strip_top - 2, strip_bottom + 2)
 
@@ -1884,7 +1890,10 @@ class StudyPanel(QWidget):
         self.room_activity.setVisible(bool(group) and known)
         if not (group and known):
             return
-        self.room_activity_title.setText(self.tr("방 시간대 · 15분 1등", "Room timeline · top per 15 min"))
+        self.room_activity_title.setText(self.tr(
+            "방 시간대 · 10분 1등",
+            "Room timeline · top per 10 min",
+        ))
         colors = self._room_member_colors()
         names = {
             str(member["user_id"]): (

@@ -19,7 +19,7 @@ PRESENCE_STUDYING_WINDOW = timedelta(minutes=2)
 # A member without any server update for this long is shown as offline.
 MEMBER_OFFLINE_AFTER = timedelta(seconds=180)
 
-SLOTS_PER_DAY = 96
+SLOTS_PER_DAY = 144
 WEEK_DAYS = 7
 FRIEND_COLORS = (
     "#34C759", "#FF9500", "#AF52DE", "#FF2D55", "#30B0C7", "#A2845E", "#5856D6",
@@ -105,7 +105,7 @@ def member_colors(member_ids: Iterable[str], my_id: str | None, my_color: str) -
 
 
 def slot_rankings(members: Iterable[dict]) -> dict[int, list[tuple[str, int]]]:
-    """Per 15-minute slot, members with answers there, most answers first.
+    """Per 10-minute slot, members with answers there, most answers first.
 
     Equal counts keep join order.  Members whose activity is not known send
     no buckets and therefore never appear.
