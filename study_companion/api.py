@@ -5,12 +5,13 @@ Provides methods and functions to invoke Supabase RPCs:
 - transfer_room_ownership
 - kick_room_member
 - cleanup_inactive_members
+- poke_room_member / fetch_my_pokes (room member pokes)
 """
 
 from __future__ import annotations
 
 from typing import Any
-from .online import SupabaseClient, SupabaseError
+from .online import PokeUnavailable, SupabaseClient, SupabaseError
 
 
 def update_room_timezone(
@@ -48,7 +49,22 @@ def list_public_study_groups(
     return client.list_public_study_groups(token, timezone_name)
 
 
+def poke_room_member(
+    client: SupabaseClient, token: str, group_id: str, target_user: str
+) -> str | None:
+    """Poke another member of the same room; returns the server created_at."""
+    return client.poke_room_member(token, group_id, target_user)
+
+
+def fetch_my_pokes(
+    client: SupabaseClient, token: str, group_id: str, since: str | None = None
+) -> list[dict[str, Any]]:
+    """Fetch unseen pokes to the caller in the room and mark them seen."""
+    return client.fetch_my_pokes(token, group_id, since)
+
+
 __all__ = [
+    "PokeUnavailable",
     "SupabaseClient",
     "SupabaseError",
     "update_room_timezone",
@@ -56,4 +72,6 @@ __all__ = [
     "kick_room_member",
     "cleanup_inactive_members",
     "list_public_study_groups",
+    "poke_room_member",
+    "fetch_my_pokes",
 ]

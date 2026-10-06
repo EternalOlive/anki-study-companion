@@ -39,6 +39,26 @@ class DeviceSnapshotConflict(SupabaseError):
         self.stored = stored
 
 
+class PokeUnavailable(SupabaseError):
+    """The server does not have the poke RPCs yet (migration not applied)."""
+
+    def __init__(self):
+        super().__init__(
+            "서버에 찌르기 기능이 아직 없습니다. / Poke is not available on this server yet.",
+            status=404,
+        )
+
+
+def _is_missing_rpc(error: SupabaseError) -> bool:
+    """PostgREST answers 404 / PGRST202 when an RPC is not in its schema cache."""
+    text = str(error).casefold()
+    return (
+        error.status == 404
+        or "pgrst202" in text
+        or "could not find the function" in text
+    )
+
+
 def load_or_create_device_id(path: Path, machine_marker: str | None = None) -> str:
     """Return an opaque installation ID that is not part of Anki profile sync.
 
@@ -587,6 +607,86 @@ class SupabaseClient:
             body={"user_timezone": str(timezone_name).strip()},
         )
         return result if isinstance(result, list) else []
+
+    def poke_room_member(self, token: str, group_id: str, target_user: str) -> str | None:
+        """Poke another member of the room; returns the server ``created_at``.
+
+        Raises ``PokeUnavailable`` when the server migration is not applied,
+        and a bilingual ``SupabaseError`` (status 429) for the rate limits.
+        """
+        try:
+            result = self._request(
+                "POST",
+                "/rest/v1/rpc/poke_room_member",
+                token=token,
+                body={
+                    "target_group": group_id,
+                    "target_user": str(target_user).strip(),
+                },
+            )
+        except SupabaseError as error:
+            if _is_missing_rpc(error):
+                raise PokeUnavailable() from error
+            message = str(error).casefold()
+            if "poke too soon" in message:
+                raise SupabaseError(
+                    "방금 찔렀어요. 1분 뒤에 다시 찌를 수 있어요. / "
+                    "You just poked them. Try again in a minute.",
+                    status=429,
+                ) from error
+            if "too many pokes" in message:
+                raise SupabaseError(
+                    "찌르기를 너무 많이 했어요. 잠시 후 다시 시도하세요. / "
+                    "Too many pokes. Try again later.",
+                    status=429,
+                ) from error
+            if "target is not in this group" in message:
+                raise SupabaseError(
+                    "이 친구는 지금 방에 없어요. / This person is no longer in the room.",
+                    status=409,
+                ) from error
+            if "cannot poke yourself" in message:
+                raise SupabaseError(
+                    "자기 자신은 찌를 수 없어요. / You cannot poke yourself.",
+                    status=400,
+                ) from error
+            raise
+        created_at = self._first(result)
+        return str(created_at) if created_at else None
+
+    def fetch_my_pokes(
+        self, token: str, group_id: str, since: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return unseen pokes to this account in the room, oldest first.
+
+        The server marks the returned rows seen in the same call, so each poke
+        is delivered at most once. Raises ``PokeUnavailable`` when the server
+        migration is not applied.
+        """
+        body: dict[str, Any] = {"target_group": group_id}
+        if since:
+            body["since"] = since
+        try:
+            result = self._request(
+                "POST", "/rest/v1/rpc/fetch_my_pokes", token=token, body=body,
+            )
+        except SupabaseError as error:
+            if _is_missing_rpc(error):
+                raise PokeUnavailable() from error
+            raise
+        if result is None:
+            return []
+        if not isinstance(result, list):
+            raise SupabaseError("찌르기 응답을 확인할 수 없습니다. / Invalid poke response.")
+        return [
+            {
+                "id": row.get("id"),
+                "from_user": str(row["from_user"]),
+                "created_at": row.get("created_at"),
+            }
+            for row in result
+            if isinstance(row, dict) and row.get("from_user")
+        ]
 
     def list_groups(self, token: str, user_id: str) -> list[dict[str, Any]]:
         rows = self._request(
