@@ -23,6 +23,7 @@ from study_companion.room_activity import (
     visible_deck_name,
     week_days,
     weekly_room_series,
+    sort_room_members,
 )
 from study_companion.tracker import STUDY_TIME_IDLE_AFTER, StudyTracker
 
@@ -208,3 +209,16 @@ class WeeklyCacheTests(TestCase):
         self.assertEqual(series["a"], [None, None, None, None, 7, 0, 11])
         # A stale member row never stands in for today.
         self.assertEqual(series["b"], [None, None, None, None, 0, 3, None])
+
+    def test_sort_room_members_by_most_study(self):
+        members = [
+            {"user_id": "idle_guest", "display_name": "UVK-K27", "answer_count": 0, "active_seconds": 0},
+            {"user_id": "top_learner", "display_name": "applemint", "answer_count": 724, "active_seconds": 12486},
+            {"user_id": "runner_up", "display_name": "W2W-T4C", "answer_count": 481, "active_seconds": 11605},
+            {"user_id": "short_study", "display_name": "JXR-9KG", "answer_count": 13, "active_seconds": 121},
+            {"user_id": "reading_only", "display_name": "Reader", "answer_count": 0, "active_seconds": 300},
+        ]
+        sorted_members = sort_room_members(members)
+        expected_ids = ["top_learner", "runner_up", "short_study", "reading_only", "idle_guest"]
+        self.assertEqual([m["user_id"] for m in sorted_members], expected_ids)
+

@@ -43,6 +43,7 @@ from .room_activity import (
     led_counts,
     slot_leader,
     slot_rankings,
+    sort_room_members,
     visible_deck_name,
     week_days,
     weekly_room_series,
@@ -2082,26 +2083,31 @@ class StudyPanel(QWidget):
         )
 
     def _refresh_members(self, members: list[dict]) -> None:
+        sorted_members = sort_room_members(members)
         incoming: dict[str, dict] = {}
-        for index, member in enumerate(members):
+        new_order: list[str] = []
+        for index, member in enumerate(sorted_members):
             key = self._member_key(member, index)
             incoming[key] = member
+            new_order.append(key)
             if key not in self.member_rows:
                 row = MemberRow(self, member, self.member_body)
                 self.member_rows[key] = row
-                self.member_order.append(key)
-                self.member_layout.insertWidget(self.member_layout.count() - 1, row)
 
         for key in list(self.member_order):
+            if key not in incoming:
+                row = self.member_rows.pop(key, None)
+                if row is not None:
+                    self.member_layout.removeWidget(row)
+                    row.deleteLater()
+
+        for index, key in enumerate(new_order):
             row = self.member_rows[key]
-            if key in incoming:
-                row.update_member(incoming[key])
-                row.show()
-            else:
-                self.member_layout.removeWidget(row)
-                row.deleteLater()
-                del self.member_rows[key]
-                self.member_order.remove(key)
+            row.update_member(incoming[key])
+            row.show()
+            self.member_layout.insertWidget(index, row)
+
+        self.member_order = new_order
 
     def _toggle_own_activity(self, expanded: bool) -> None:
         self.own_activity_timeline.setVisible(expanded)

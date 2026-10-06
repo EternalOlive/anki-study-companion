@@ -229,3 +229,16 @@ def weekly_room_series(
             values.append(None)
         series[user_id] = values
     return series
+
+
+def sort_room_members(members: Iterable[dict]) -> list[dict]:
+    """Sort room members in order of most study: answers desc, active_seconds desc, display_name."""
+    return sorted(
+        members or [],
+        key=lambda m: (
+            -max(0, int(m.get("answer_count") or 0)),
+            -max(0, int(m.get("active_seconds") or 0)),
+            str(m.get("display_name") or m.get("user_id") or ""),
+        ),
+    )
+
