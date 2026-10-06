@@ -23,11 +23,12 @@ from aqt.qt import (
     QTimer,
     Qt,
 )
-from aqt.utils import showWarning
+from aqt.utils import showWarning, tooltip
 
 from .online import (
     DeviceSyncLedger,
     DeviceSnapshotConflict,
+    PokeUnavailable,
     SupabaseClient,
     SupabaseError,
     load_or_create_device_id,
@@ -35,6 +36,7 @@ from .online import (
 )
 from .nicknames import canonical_nickname, localize_nickname, disambiguate_nickname
 from .outbox import SyncOutbox
+from .pokes import POKE_UNAVAILABLE_RETRY_SECONDS, poke_message
 from .record_status import (
     LOCAL_READ,
     LOCAL_SAVE,
@@ -650,6 +652,63 @@ class Controller:
             display = disambiguate_nickname(display, member["user_id"], True)
         return display
 
+    def pokes_available(self):
+        """False while the server is known to lack the poke RPCs."""
+        until = float(getattr(self, "_pokes_unavailable_until", 0) or 0)
+        return time.monotonic() >= until
+
+    def _disable_pokes(self):
+        self._pokes_unavailable_until = time.monotonic() + POKE_UNAVAILABLE_RETRY_SECONDS
+
+    def poke_member(self, member):
+        """Poke another member of the current room in the background.
+
+        Returns False without a request when poking is not possible. A server
+        without the poke migration hides the feature silently; other failures
+        (rate limit, network) show a non-blocking tooltip.
+        """
+        group_id = (self.online.get("group") or {}).get("id")
+        user_id = str((member or {}).get("user_id") or "")
+        my_id = str((self.online.get("auth") or {}).get("user_id") or "")
+        if not group_id or not user_id or user_id == my_id or not self.pokes_available():
+            return False
+        name = self.display_member_name(member)
+        unavailable = object()
+
+        def operation(token):
+            try:
+                return self.client.poke_room_member(token, group_id, user_id)
+            except PokeUnavailable:
+                return unavailable
+
+        def success(result):
+            if result is unavailable:
+                self._disable_pokes()
+                self.refresh_panel()
+                return
+            tooltip(self.t(f"{name}님을 콕 찔렀어요", f"You poked {name}"), period=2500)
+
+        self._run_authenticated_action(
+            [], operation, success, self.t("찌르지 못했어요.", "Could not poke."),
+            on_error=lambda message: tooltip(message, period=4000),
+        )
+        return True
+
+    def show_pokes(self, pokes):
+        """Show newly received pokes as one non-blocking tooltip."""
+        members = {
+            str(member.get("user_id")): member
+            for member in (self.online.get("members") or [])
+            if isinstance(member, dict) and member.get("user_id")
+        }
+
+        def name_for(user_id):
+            return self.display_member_name(members.get(user_id) or {"user_id": user_id})
+
+        message = poke_message(pokes, name_for, self.t)
+        if message:
+            tooltip(message, period=5000)
+
     def _build_side_panel(self):
         self.panel = QDockWidget(self.t("스터디", "Study"), mw)
         self.panel.setObjectName("study_companion_panel")
@@ -1159,6 +1218,17 @@ class Controller:
             if fetch_members else []
         )
         week_results = {}
+        # Pokes are best-effort: fetched every sync while in a room (also with
+        # the panel hidden, since the tooltip is the notification), skipped for
+        # a while once the server is known to lack the RPC, never an error.
+        poke_fetcher = getattr(getattr(self, "client", None), "fetch_my_pokes", None)
+        fetch_pokes = (
+            bool(group)
+            and callable(poke_fetcher)
+            and retry_clock >= float(getattr(self, "_pokes_unavailable_until", 0) or 0)
+        )
+        poke_results = []
+        poke_state = {}
         if group:
             previous_route = self.sync_outbox.route(self.device_id)
             # Local Anki totals are shared across rooms. Namespace the device
@@ -1370,6 +1440,17 @@ class Controller:
                         # next member refresh retries it.
                     except Exception:
                         pass
+                poke_results.clear()
+                poke_state.clear()
+                if fetch_pokes:
+                    try:
+                        poke_results.extend(poke_fetcher(token, group_id) or [])
+                    except SupabaseError as error:
+                        # 404 / PGRST202: the poke migration is not applied.
+                        if error.status == 404:
+                            poke_state["unavailable"] = True
+                    except Exception:
+                        pass
                 return acknowledgements, members, deck_published, first_error
             try:
                 acknowledgements, members, deck_published, upload_error = upload(token)
@@ -1485,6 +1566,18 @@ class Controller:
                     self.online["members"] = members
                     self._member_cache_key = member_cache_key
                     self._last_member_fetch_at = clock_module.time()
+                if poke_state.get("unavailable"):
+                    from study_companion.pokes import POKE_UNAVAILABLE_RETRY_SECONDS
+                    self._pokes_unavailable_until = (
+                        clock_module.monotonic() + POKE_UNAVAILABLE_RETRY_SECONDS
+                    )
+                if poke_results:
+                    show_pokes = getattr(self, "show_pokes", None)
+                    if callable(show_pokes):
+                        try:
+                            show_pokes(list(poke_results))
+                        except Exception:
+                            pass
                 if week_results:
                     stored_weeks = self.online.get("room_week_stats")
                     if not isinstance(stored_weeks, dict):

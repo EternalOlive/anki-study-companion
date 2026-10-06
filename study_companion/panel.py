@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import re
+import time
 from datetime import datetime
 
 from aqt.qt import (
@@ -33,6 +34,7 @@ from aqt.qt import (
 )
 
 from .history import get_comparison
+from .pokes import POKE_COOLDOWN_SECONDS
 from .room_activity import (
     TIE_COLOR,
     member_colors,
@@ -945,7 +947,24 @@ class MemberRow(QWidget):
         self.compact_metrics.hide()
         for label in (self.dot, self.time, self.answers):
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        layout.addWidget(self.identity)
+        # The poke action sits beside (not inside) the expandable summary
+        # button so it keeps its own focus, click and accessible name.
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        columns = getattr(panel, "member_columns", None)
+        self._header_spacing = max(0, columns.spacing()) if columns is not None else 6
+        header.setSpacing(self._header_spacing)
+        header.addWidget(self.identity, 1)
+        self.poke = QToolButton(self)
+        self.poke.setObjectName("member_poke")
+        self.poke.setAutoRaise(True)
+        _set_font(self.poke, scale=0.85)
+        self.poke.setStyleSheet("QToolButton#member_poke { padding: 0px 2px; }")
+        self.poke.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.poke.clicked.connect(lambda: self.panel.poke_member(self.member))
+        self.poke.hide()
+        header.addWidget(self.poke, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(header)
 
         self.detail_body = QWidget(self)
         detail_layout = QVBoxLayout(self.detail_body)
@@ -975,14 +994,48 @@ class MemberRow(QWidget):
             + self.summary.horizontalSpacing()
         )
         identity_floor = max(110, self.fontMetrics().horizontalAdvance("MMMMMMMMMM"))
-        compact = self.width() < metrics_width + identity_floor + 34
+        compact = self.width() < metrics_width + identity_floor + 34 + self._poke_reserve()
         self._set_compact(compact)
+
+    def _poke_reserve(self) -> int:
+        if self.poke.isHidden():
+            return 0
+        return self.poke.width() + self._header_spacing
+
+    def update_poke(self) -> None:
+        """Show the poke action for other members while the server supports it."""
+        member = self.member
+        visible = self.panel.can_poke(member)
+        self.poke.setVisible(visible)
+        if not visible:
+            return
+        name = self.panel.member_name(member)
+        cooling = self.panel.poke_cooling(member)
+        text = self.panel.tr("찌르기", "Poke")
+        self.poke.setText(text)
+        self.poke.setFixedWidth(self.poke.fontMetrics().horizontalAdvance(text) + 8)
+        self.poke.setEnabled(not cooling)
+        tip = (
+            self.panel.tr(
+                f"{name} 님을 방금 찔렀어요. 1분 뒤에 다시 찌를 수 있어요.",
+                f"You just poked {name}. You can poke again in a minute.",
+            )
+            if cooling
+            else self.panel.tr(f"{name} 님 콕 찌르기", f"Poke {name}")
+        )
+        self.poke.setToolTip(tip)
+        self.poke.setAccessibleName(tip)
 
     def _set_compact(self, compact: bool) -> None:
         rows = getattr(self.panel, "member_rows", {})
         show_columns = not compact and not any(row._compact for row in rows.values() if row is not self)
         self.panel.time_column.setVisible(show_columns)
         self.panel.answer_column.setVisible(show_columns)
+        poke_column = getattr(self.panel, "poke_column", None)
+        if poke_column is not None:
+            # Keeps the time/answer headings aligned above rows with a poke button.
+            poke_column.setFixedWidth(self.poke.width())
+            poke_column.setVisible(show_columns and not self.poke.isHidden())
         if compact == self._compact:
             return
         self._compact = compact
@@ -1017,6 +1070,7 @@ class MemberRow(QWidget):
 
     def update_member(self, member: dict) -> None:
         self.member = member
+        self.update_poke()
         foreground = self.panel.palette().color(QPalette.ColorRole.WindowText).name()
         for label in (self.identity_text, self.time, self.answers):
             label.setStyleSheet(f"color: {foreground}; background: transparent;")
@@ -1102,6 +1156,7 @@ class MemberRow(QWidget):
             + self.answers.sizeHint().width()
             + max(110, self.fontMetrics().horizontalAdvance("MMMMMMMMMM"))
             + 34
+            + self._poke_reserve()
         )
 
 
@@ -1113,6 +1168,8 @@ class StudyPanel(QWidget):
         self.controller = controller
         self.member_rows: dict[str, MemberRow] = {}
         self.member_order: list[str] = []
+        # user_id -> monotonic time until which that friend's poke is disabled.
+        self.poke_cooldowns: dict[str, float] = {}
         self.history_mode = "yesterday"
         self.weekly_selected_day: str | None = None
         self.collapsed = False
@@ -1244,6 +1301,10 @@ class StudyPanel(QWidget):
         columns.addWidget(self.people_caption, 1)
         columns.addWidget(self.time_column)
         columns.addWidget(self.answer_column)
+        self.poke_column = QWidget(self)
+        self.poke_column.hide()
+        columns.addWidget(self.poke_column)
+        self.member_columns = columns
         outer.addLayout(columns)
 
         self.member_empty = QLabel(self)
@@ -1519,6 +1580,36 @@ class StudyPanel(QWidget):
         dot.setAccessibleName(self.status_text(status))
         dot.setToolTip(self.status_text(status))
         dot.setVisible(status in ("studying", "online", "paused"))
+
+    def pokes_enabled(self) -> bool:
+        available = getattr(self.controller, "pokes_available", None)
+        group = (getattr(self.controller, "online", None) or {}).get("group")
+        return bool(group) and callable(available) and bool(available())
+
+    def can_poke(self, member: dict) -> bool:
+        """Only other members of the current room, never the own row."""
+        if not self.pokes_enabled():
+            return False
+        user_id = str(member.get("user_id") or "")
+        my_id = str((self.controller.online.get("auth") or {}).get("user_id") or "")
+        return bool(user_id) and user_id != my_id
+
+    def poke_cooling(self, member: dict) -> bool:
+        until = self.poke_cooldowns.get(str(member.get("user_id") or ""), 0.0)
+        return time.monotonic() < until
+
+    def poke_member(self, member: dict) -> bool:
+        if not self.can_poke(member) or self.poke_cooling(member):
+            return False
+        poke = getattr(self.controller, "poke_member", None)
+        if not callable(poke) or poke(member) is False:
+            return False
+        user_id = str(member.get("user_id") or "")
+        self.poke_cooldowns[user_id] = time.monotonic() + POKE_COOLDOWN_SECONDS
+        for row in self.member_rows.values():
+            if str(row.member.get("user_id") or "") == user_id:
+                row.update_poke()
+        return True
 
     def member_name(self, member: dict) -> str:
         display = getattr(self.controller, "display_member_name", None)
@@ -2075,6 +2166,8 @@ class StudyPanel(QWidget):
         self.time_column.setText(self.tr("시간", "Time"))
         self.answer_column.setText(self.tr("답변", "Answers"))
         self._refresh_members(members)
+        if not self.pokes_enabled():
+            self.poke_column.hide()
         self.member_body.setVisible(bool(members))
         self.member_empty.setVisible(not members)
         self.no_room_actions.setVisible(not group)

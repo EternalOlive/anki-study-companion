@@ -150,6 +150,8 @@ class FakeController:
         self.review_query_in_flight = False
         self.review_dirty = False
         self.review_upload_requested = False
+        self.pokes_supported = True
+        self.poked = []
 
     def t(self, korean, english):
         return english if self.locale == "en" else korean
@@ -159,6 +161,13 @@ class FakeController:
 
     def display_member_name(self, member):
         return member.get("display_name", "Friend")
+
+    def pokes_available(self):
+        return self.pokes_supported
+
+    def poke_member(self, member):
+        self.poked.append(member.get("user_id"))
+        return True
 
     def show_dialog(self, *, page=None):
         self.dialog_pages.append(page)
@@ -298,6 +307,26 @@ def main() -> int:
     panel.refresh()
     assert not first_row.deck.isVisible()
     friend["status"] = "studying"
+    panel.refresh()
+    # Poke: shown on friends' rows only, disabled during the cooldown, hidden
+    # entirely when the server lacks the poke RPCs.
+    assert first_row.poke.isVisible() and first_row.poke.isEnabled()
+    assert first_row.poke.text() == "찌르기"
+    assert "self" not in panel.member_rows
+    first_row.poke.click()
+    app.processEvents()
+    assert controller.poked == [friend["user_id"]]
+    assert not first_row.poke.isEnabled()
+    first_row.poke.click()
+    assert controller.poked == [friend["user_id"]]
+    panel.refresh()
+    assert not first_row.poke.isEnabled()
+    assert panel.member_rows["friend-b"].poke.isEnabled()
+    controller.pokes_supported = False
+    panel.refresh()
+    assert not first_row.poke.isVisible()
+    assert not panel.poke_column.isVisible()
+    controller.pokes_supported = True
     panel.refresh()
     first_row.identity.click()
     panel.history_toggle.setChecked(True)

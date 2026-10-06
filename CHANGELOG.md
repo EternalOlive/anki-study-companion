@@ -11,8 +11,20 @@
 - `20261004_leave_study_group_idempotent.sql`: 이미 내보내졌거나 나간 사용자의 반복 탈퇴 요청을 성공으로 처리한다. 다른 멤버·차단 기록은 변경하지 않는다.
 - `20261006_room_management.sql`: 방 관리 RPC 4종(`update_room_timezone`, `transfer_room_ownership`, `kick_room_member`, `cleanup_inactive_members`)을 추가했다. 방장만 호출 가능하며 JWT 인증이 필요하다.
 - `20261006_public_rooms.sql`: `study_groups` 테이블에 `is_public` 플래그 및 인덱스를 추가하고, 공개 방 목록을 필터링·추천 정렬하는 `list_public_study_groups(user_timezone)` RPC와 `create_study_group` 공개 플래그 파라미터를 추가했다.
+- `20261006_member_pokes.sql`: 방 멤버끼리 찌르기 RPC 2종(`poke_room_member`, `fetch_my_pokes`)과 `member_pokes` 테이블을 추가했다. 기존 RPC는 바뀌지 않는다. 미적용 서버에서도 새 애드온은 찌르기 버튼만 숨기고 정상 동작한다. 운영 서버 적용은 저장소 관리자가 한다(이 변경 시점 미적용).
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
+
+## 찌르기 — 2026-10-06
+
+요청: 방 친구들이 서로 찌를 수 있게.
+
+- 패널의 친구 행 오른쪽에 작은 `찌르기` 버튼을 둔다. 내 행에는 없다. 누르면 그 친구 버튼만 60초 동안 꺼지고(서버 제한과 같다) `○○님을 콕 찔렀어요` 툴팁을 띄운다. 너무 자주 누르면 서버 제한 안내를 툴팁으로 보이며, 창을 띄우지 않는다.
+- 약 30초 동기화마다 나에게 온 찌르기를 확인해 `○○님이 콕 찔렀어요` 툴팁을 띄운다. 한 사람이 여러 번 찌르면 `○○님(2번)`으로 묶는다. 이름은 친구 행과 같은 표시 이름(고유번호)이다. 패널이 숨겨져 있어도 확인한다.
+- 서버에 찌르기 RPC가 없으면(404 / PGRST202) 오류 표시 없이 버튼을 숨기고 조회를 멈추며, 30분 뒤 다시 확인한다. 찌르기 조회 실패는 기록 전송 상태·재시도 간격에 영향을 주지 않는다.
+- 패널 폭이 약 320px보다 좁으면 버튼 자리 때문에 친구 행이 기존보다 일찍 두 줄 배치로 바뀐다.
+- 서버 계약: `supabase/migrations/20261006_member_pokes.sql` — `poke_room_member(target_group, target_user)`, `fetch_my_pokes(target_group, since)`. 상세는 [공개 API 계약](PUBLIC_API_CONTRACT.md)의 `찌르기 RPC`. 회귀 SQL은 `supabase/tests/member_pokes.sql`(TEST DB 전용, 롤백).
+- 클라이언트: `SupabaseClient.poke_room_member`·`fetch_my_pokes`, `api.py` 내보내기, 미적용 서버 표시용 `PokeUnavailable`.
 
 ## 공개 스터디방 및 방 관리 — 2026-10-06
 
