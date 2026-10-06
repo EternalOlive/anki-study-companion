@@ -260,7 +260,7 @@ class Controller:
         self.closed = False
         self.label = QLabel(mw)
         mw.statusBar().addPermanentWidget(self.label)
-        self.action = mw.form.menuTools.addAction("스터디 현황")
+        self.action = mw.form.menuTools.addAction(self.t("스터디 관리", "Study settings"))
         self.action.triggered.connect(self.show_dialog)
         self._build_side_panel()
         self.watcher = InputWatcher(self)

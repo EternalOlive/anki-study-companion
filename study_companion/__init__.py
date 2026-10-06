@@ -1,6 +1,6 @@
 """PC Anki study companion."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 # Import Anki integration only inside Anki. This keeps the timer testable alone.
 try:
