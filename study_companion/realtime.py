@@ -147,6 +147,7 @@ class RealtimeClient(QObject):
         self._ref = 0
         self.group_id: str | None = None
         self.user_id: str | None = None
+        self.token: str | None = None
         self._current_topic: str | None = None
         self._channel_joined = False
 
@@ -185,18 +186,31 @@ class RealtimeClient(QObject):
         self.base_ws_url = base_ws_url.rstrip("/")
         self.apikey = apikey
 
-    def join_room(self, group_id: str, user_id: str) -> None:
-        """Connect and join room channel for live broadcast and presence."""
+    def join_room(self, group_id: str, user_id: str, token: str | None = None) -> None:
+        """Connect and join room channel for live broadcast and presence with optional JWT."""
         if not self.is_available():
             return
-        if self.group_id == group_id and self.user_id == user_id and self._channel_joined:
+        if self.group_id == group_id and self.user_id == user_id and self.token == token and self._channel_joined:
             return
 
         self.group_id = str(group_id)
         self.user_id = str(user_id)
+        self.token = token
         self._presence_store.clear()
 
         self._connect_socket()
+
+    def update_token(self, token: str) -> None:
+        """Send refreshed JWT to the realtime channel."""
+        self.token = token
+        if self._channel_joined:
+            msg = {
+                "topic": "realtime",
+                "event": "access_token",
+                "payload": {"access_token": token},
+                "ref": str(self._next_ref()),
+            }
+            self._send_json(msg)
 
     def leave_room(self) -> None:
         """Leave current room channel and disconnect."""
@@ -320,15 +334,18 @@ class RealtimeClient(QObject):
         if self.group_id and self.user_id:
             topic = f"realtime:room:{self.group_id}"
             self._current_topic = topic
+            config: dict[str, Any] = {
+                "broadcast": {"self": False},
+                "presence": {"key": self.user_id},
+            }
+            join_payload: dict[str, Any] = {"config": config}
+            if self.token:
+                config["private"] = True
+                join_payload["access_token"] = self.token
             join_msg = {
                 "topic": topic,
                 "event": "phx_join",
-                "payload": {
-                    "config": {
-                        "broadcast": {"self": False},
-                        "presence": {"key": self.user_id},
-                    }
-                },
+                "payload": join_payload,
                 "ref": str(self._next_ref()),
             }
             self._send_json(join_msg)

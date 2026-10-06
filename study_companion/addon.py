@@ -408,8 +408,10 @@ class Controller:
     def _on_realtime_review_tick(self, user_id: str, slot: int, answers: int, time_ms: int):
         members = self.online.get("members")
         if isinstance(members, list):
-            if apply_review_tick_to_members(members, user_id, slot, answers, time_ms):
-                self.refresh()
+            member_ids = {str(m.get("user_id")) for m in members if isinstance(m, dict)}
+            if user_id in member_ids:
+                if apply_review_tick_to_members(members, user_id, slot, answers, time_ms):
+                    self.refresh()
 
     def _on_realtime_presence_changed(self, presences: dict):
         members = self.online.get("members")
@@ -442,8 +444,9 @@ class Controller:
         auth = self.online.get("auth") or {}
         group_id = group.get("id")
         user_id = auth.get("user_id")
+        token = self._access_token()
         if group_id and user_id:
-            realtime.join_room(group_id, user_id)
+            realtime.join_room(group_id, user_id, token=token)
             status, deck_name = self._current_presence_meta()
             display_name = sanitize_display_name(
                 self.online.get("display_name"),
@@ -465,7 +468,7 @@ class Controller:
         ) is None:
             self.refresh_review_history()
         self.ticks_since_save += 1
-        sync_interval = 300 if getattr(self, "realtime", None) and self.realtime.is_connected() else 30
+        sync_interval = 30
         if self.ticks_since_save >= sync_interval:
             self.save()
             self.sync_async()
