@@ -204,7 +204,7 @@ def _load_class_methods(relative_path, class_name, method_names, scope):
         if isinstance(item, ast.FunctionDef) and item.name in method_names
     ]
     node.bases = []
-    namespace = dict(scope)
+    namespace = {"__package__": "study_companion", **scope}  # addon.py uses relative imports
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
     return namespace[class_name]
 

@@ -39,7 +39,7 @@ def _controller_with(*method_names: str, scope: dict | None = None):
         node for node in original.body
         if isinstance(node, ast.FunctionDef) and node.name in wanted
     ]
-    namespace = dict(scope or {})
+    namespace = {"__package__": "study_companion", **(scope or {})}  # addon.py uses relative imports
     module = ast.fix_missing_locations(
         ast.Module(
             body=[ast.ClassDef("Controller", [], [], methods, [])],
@@ -531,7 +531,7 @@ class ReviewHookIntegrationTests(TestCase):
             review_allow_removals=False,
             refresh_review_history=Mock(),
         )
-        scope = {"controller": fake}
+        scope = {"__package__": "study_companion", "controller": fake}
         exec(compile(ast.Module(functions, type_ignores=[]), str(ADDON), "exec"), scope)
 
         scope["review_history_changed"]("any operation")

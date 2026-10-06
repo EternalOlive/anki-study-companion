@@ -541,7 +541,7 @@ class Controller:
         return self.review_history.today(day) or {"seconds": 0, "answers": 0}
 
     def weekly_record(self, current):
-        from study_companion.study_day import DEFAULT_TIME_ZONE, study_day
+        from .study_day import DEFAULT_TIME_ZONE, study_day
 
         snapshot = self._weekly_activity
         if not isinstance(snapshot, dict):
@@ -568,7 +568,7 @@ class Controller:
             return
         from aqt.operations import QueryOp
         from datetime import timezone as datetime_timezone
-        from study_companion.study_day import (
+        from .study_day import (
             DEFAULT_TIME_ZONE,
             current_day_bounds,
             day_bounds,
@@ -1245,12 +1245,12 @@ class Controller:
     def sync_async(self, force=False):
         from datetime import timedelta
         import time as clock_module
-        from study_companion.study_day import (
+        from .study_day import (
             DEFAULT_TIME_ZONE,
             room_time_zone,
             study_day,
         )
-        from study_companion.room_activity import (
+        from .room_activity import (
             missing_week_days,
             presence_status,
             prune_week_cache,
@@ -1725,7 +1725,7 @@ class Controller:
                     self._member_cache_key = member_cache_key
                     self._last_member_fetch_at = clock_module.time()
                 if poke_state.get("unavailable"):
-                    from study_companion.pokes import POKE_UNAVAILABLE_RETRY_SECONDS
+                    from .pokes import POKE_UNAVAILABLE_RETRY_SECONDS
                     self._pokes_unavailable_until = (
                         clock_module.monotonic() + POKE_UNAVAILABLE_RETRY_SECONDS
                     )

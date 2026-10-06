@@ -19,7 +19,7 @@ class SyncStartTests(TestCase):
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == 'sync_async']
         self.schedule = Mock()
         self.clock = Mock(return_value=datetime(2026, 10, 3, 23, 59, 59, tzinfo=timezone.utc))
-        scope = {'now': self.clock, 'canonical_nickname': lambda uid: 'ABC-DEF',
+        scope = {'__package__': 'study_companion', 'now': self.clock, 'canonical_nickname': lambda uid: 'ABC-DEF',
                  'mw': SimpleNamespace(taskman=SimpleNamespace(run_in_background=self.schedule))}
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(path), 'exec'), scope)
         self.controller = scope['Controller']()
