@@ -245,22 +245,27 @@ class SettingsDialog(QDialog):
         room_section_layout.addLayout(self.room_layout)
         room_tab_layout.addWidget(room)
 
-        self.members_section, members_section_layout = self._section(
-            self.room_tab_content, self._t("멤버", "Members")
+        self.members_section = QWidget(self.room_tab_content)
+        members_section_layout = QVBoxLayout(self.members_section)
+        members_section_layout.setContentsMargins(0, 0, 0, 0)
+        members_section_layout.setSpacing(8)
+
+        members_header = QHBoxLayout()
+        members_header.addWidget(self._heading(self._t("멤버", "Members")))
+        members_header.addStretch(1)
+        self.members_refresh = QPushButton(
+            self._t("새로고침", "Refresh"), self.members_section
         )
+        self.members_refresh.clicked.connect(self.load_members)
+        members_header.addWidget(self.members_refresh)
+        members_section_layout.addLayout(members_header)
+
         self.members_list_layout = QVBoxLayout()
         self.members_list_layout.setContentsMargins(0, 0, 0, 0)
         self.members_list_layout.setSpacing(8)
         members_section_layout.addLayout(self.members_list_layout)
         self.members_error = self._error_label()
         members_section_layout.addWidget(self.members_error)
-        self.members_refresh = QPushButton(
-            self._t("새로고침", "Refresh"), self.members_section
-        )
-        self.members_refresh.clicked.connect(self.load_members)
-        members_refresh_row = QHBoxLayout()
-        members_refresh_row.addStretch(1)
-        members_refresh_row.addWidget(self.members_refresh)
         room_tab_layout.addWidget(self.members_section)
 
         self.public_section, public_section_layout = self._section(
