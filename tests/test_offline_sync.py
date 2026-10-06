@@ -73,7 +73,7 @@ class OfflineSyncTests(unittest.TestCase):
             if isinstance(node, ast.FunctionDef) and node.name == "sync_async"
         ]
         cls.scheduled = []
-        scope = {
+        scope = {"__package__": "study_companion",  # addon.py uses relative imports
             "now": lambda: cls.clock,
             "canonical_nickname": lambda user_id: "ABC-DEF",
             "SupabaseError": SupabaseError,

@@ -17,6 +17,14 @@
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
 
+## AnkiWeb 설치 폴더 이름 — 2026-10-07
+
+요청: AnkiWeb으로 설치한 애드온(`addons21/124974592`)이 복습 기록을 읽을 때 `ModuleNotFoundError: No module named 'study_companion'`로 멈춘다.
+
+- `addon.py` 안의 함수 내부 import 5곳(`study_day` 3 · `room_activity` 1 · `pokes` 1)이 `study_companion.x`처럼 **패키지 이름**으로 불렀다. AnkiWeb은 폴더를 숫자 ID로 만들어서 그 이름의 패키지가 없다 → 모두 `.x` 상대 import로 바꿨다.
+- `tests/test_package_imports.py`: 애드온 모듈이 자기 패키지를 이름으로 import하면 실패하는 검사를 더했다.
+- 클래스만 떼어 `exec`로 시험하던 테스트 4개(`test_member_pokes`·`test_offline_sync`·`test_review_integration`·`test_sync_start`)는 실행 범위에 `__package__`를 넣어 상대 import가 풀리게 했다.
+
 ## 0.1.3 — 2026-10-07
 
 - **방 친구 찌르기 (Poke)**: 친구 행의 `찌르기` 버튼을 통해 서로 알림을 전송할 수 있는 기능 추가.
