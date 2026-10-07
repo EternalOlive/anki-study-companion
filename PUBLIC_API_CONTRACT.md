@@ -6,10 +6,12 @@
 
 | RPC | 인자 | 결과 | 권한·주요 오류 |
 |---|---|---|---|
-| `create_study_group` | `group_name`, `room_timezone` | `group_id`, 4자리 `invite_code`, `time_zone`, `day_start_hour` | 인증 사용자. 올바르지 않은 이름·시간대 거부 |
-| `join_study_group_safe` | `code` | 방 JSON | 인증 사용자. 요청 제한, 없는 코드, 8명 상한, 차단 사용자 거부 |
+| `create_study_group` | `group_name`, `room_timezone`, `is_public`(선택, 기본값 `false`) | `group_id`, 4자리 `invite_code`, `time_zone`, `day_start_hour` | 인증 사용자. 올바르지 않은 이름·시간대 거부 |
+| `join_study_group_safe` | `code` | 방 JSON | 인증 사용자. 요청 제한, 없는 코드, 10명 상한, 차단 사용자 거부 |
 | `leave_study_group` | `target_group` | 없음 | 본인만 탈퇴. 이미 비멤버이거나 없는 방은 성공인 멱등 처리 |
 | `rotate_study_group_invite` | `target_group` | 새 초대 코드 | 방장만 가능 |
+| `update_room_public` | `target_group`, `new_is_public` | 없음 | 방장만 가능. 방 공개/비공개 여부 전환 |
+| `list_public_study_groups` | `user_timezone`(선택) | 공개 방 목록(id, name, invite_code, time_zone, member_count, studying_count, owner_id, created_at) | 인증 사용자. 정원(10명) 미만 공개 방 최대 30개 반환 |
 | `moderate_study_group_member` | `target_group`, `target_user`, `blocked` | 없음 | 방장만 가능. 내보내기·재입장 차단 또는 차단 해제 |
 | `list_study_group_bans` | `target_group` | 차단된 `user_id` 목록 | 방장만 가능 |
 | `sync_review_day` | `target_group`, `source_collection`, `target_day`, `reviews`, `removed_ids` | 해당 날짜의 이벤트 수·시간 합계·갱신 시각 | 본인 데이터만. 방 멤버, 날짜·event 구조·답변 시간 상한 검증 |
@@ -17,17 +19,27 @@
 | `get_group_device_stats` | `target_group`, `target_day` | 멤버별 시간·답변·목표·상태 | 방 멤버만. 공개 합계는 동기화 복습 원본을 우선 사용 |
 | `set_current_deck` | `target_group`, `source_device`, `deck_name` | 없음 | 본인 현재 덱만. `null`은 공유값 제거, 최대 300자 |
 | `get_group_current_decks` | `target_group` | 멤버별 덱 이름·갱신 시각 | 방 멤버만 |
-| `get_group_activity_timeline` | `target_group`, `target_day` | 멤버별 15분 활동 구간·기록 확인 가능 여부 | 방 멤버만, 방 04:00 경계 날짜 사용 |
-| `poke_room_member` | `target_group`, `target_user` | 서버 `created_at`(timestamptz) | 호출자·대상 모두 방 멤버. 자기 자신 불가. 같은 방·같은 대상 60초 1회, 보낸 사람당 1시간 30회 |
+| `get_group_activity_timeline` | `target_group`, `target_day` | 멤버별 10분 활동 구간(하루 144칸)·기록 확인 가능 여부 | 방 멤버만, 방 04:00 경계 날짜 사용 |
+| `poke_room_member` | `target_group`, `target_user` | 서버 `created_at`(timestamptz) | 호출자·대상 모두 방 멤버. 자기 자신 불가. 같은 방·같은 대상 60초 1회, 보낸 사람당 1시간 60회 |
 | `fetch_my_pokes` | `target_group`, `since`(선택) | `id`, `from_user`, `created_at` 행 배열 | 방 멤버만. 반환한 행을 같은 호출에서 확인 처리(한 번만 전달) |
+
+## 방 공개 여부 및 정원 규격
+
+- `study_groups.is_public` (boolean): 방의 공개 여부 플래그.
+  - 공개 방(`is_public = true`): 누구나 `list_public_study_groups`로 탐색하거나 초대 코드로 참여 가능.
+  - 비공개 방(`is_public = false`): 초대 코드를 아는 사람만 참여 가능.
+- `update_room_public(target_group uuid, new_is_public boolean) returns void`
+  - `20261007_update_room_public.sql` 적용 필요 (방장 전용 RPC).
+  - 미적용 서버는 `PGRST202`를 반환하므로 주의 필요.
+- 방 정원: `20261007_group_member_limit_ten.sql` 적용 기준 **최대 10명** (기존 8명에서 10명으로 확대).
 
 ## 찌르기 RPC
 
-`20261006_member_pokes.sql`이 적용된 서버에서만 사용할 수 있다. 미적용 서버는 PostgREST `404`(`PGRST202`, "Could not find the function …")를 돌려주므로, 클라이언트는 이 응답을 오류로 표시하지 말고 찌르기 기능만 숨긴다(PC 애드온은 30분 뒤 다시 확인).
+`20261006_member_pokes.sql` 및 `20261008_poke_hourly_limit_sixty.sql`이 적용된 서버에서만 사용할 수 있다. 미적용 서버는 PostgREST `404`(`PGRST202`, "Could not find the function …")를 돌려주므로, 클라이언트는 이 응답을 오류로 표시하지 말고 찌르기 기능만 숨긴다(PC 애드온은 30분 뒤 다시 확인).
 
 - `poke_room_member(target_group uuid, target_user uuid) returns timestamptz`
   - 결과: 저장된 찌르기의 `created_at`.
-  - 제한: 같은 보낸 사람 → 받는 사람·같은 방은 60초에 1회, 보낸 사람당 모든 방 합쳐 1시간에 30회. 호출할 때마다 7일 지난 찌르기를 지운다.
+  - 제한: 같은 보낸 사람 → 받는 사람·같은 방은 60초에 1회, 보낸 사람당 모든 방 합쳐 1시간에 60회 (`20261008_poke_hourly_limit_sixty.sql`). 호출할 때마다 7일 지난 찌르기를 지운다.
   - 차단(`study_group_bans`)된 계정은 멤버십이 없으므로 찌르거나 찔릴 수 없다.
 - `fetch_my_pokes(target_group uuid, since timestamptz default now() - interval '10 minutes') returns table (id bigint, from_user uuid, created_at timestamptz)`
   - 결과: 그 방에서 호출자에게 온 아직 확인하지 않은 찌르기 중 `since` 이후 것, 오래된 순, 최대 50개.
@@ -44,11 +56,31 @@
 | `blocked from this group` | 호출자가 차단됨(방어용 이중 검사) | 그대로 |
 | `target is not in this group` | 대상이 방에 없음·차단됨 | 409 · 이 친구는 지금 방에 없어요 |
 | `poke too soon` | 같은 대상 60초 이내 재요청 | 429 · 1분 뒤에 다시 |
-| `too many pokes` | 1시간 30회 초과 | 429 · 잠시 후 다시 |
+| `too many pokes` | 1시간 60회 초과 | 429 · 잠시 후 다시 |
+
+## 실시간 WebSocket Presence 및 Broadcast 규격
+
+Supabase Realtime 채널 `room:{group_id}`을 통한 사용자 상태 공유 규격이다.
+
+### Presence 메타데이터 페이로드
+각 클라이언트는 방에 참여할 때 `presence.track` 이벤트로 아래 메타데이터를 전송한다:
+```json
+{
+  "status": "studying",
+  "current_deck_name": "TOEIC Voca",
+  "display_name": "User123",
+  "dnd": false
+}
+```
+- `status`: 현재 상태 (`"studying"`, `"paused"`, `"online"`).
+- `current_deck_name`: 현재 학습 중인 덱 이름 (`string | null`).
+- `display_name`: 닉네임 (`string | null`).
+- `dnd` (boolean): **방해 금지 모드 여부**. `true`인 경우 다른 클라이언트는 해당 유저에 대한 찌르기 버튼을 비활성화하고 `[방해금지]` / `[DND]` 뱃지로 표시한다.
 
 ## 테이블 조회 계약
 
 - `profiles`: 사용자는 자기 프로필을 만들고 수정할 수 있다. 조회는 같은 방에서 만나는 사용자 범위로 제한된다.
+- `study_groups`: 방 멤버는 소속된 방의 메타데이터를 조회할 수 있으며, `is_public = true`인 방은 로그인한 모든 사용자가 탐색용으로 조회할 수 있다.
 - `group_members`: 방 멤버는 같은 방의 멤버십을 조회할 수 있다. 참여·탈퇴·차단은 위 RPC를 사용한다.
 - `daily_stats`: 클라이언트 직접 INSERT/UPDATE는 지원하지 않는다. 이전 웹 구현은 `record_device_day`와 `sync_review_day`로 전환해야 한다.
 

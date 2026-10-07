@@ -12,8 +12,11 @@
 - `20261006_room_management.sql`: 방 관리 RPC 4종(`update_room_timezone`, `transfer_room_ownership`, `kick_room_member`, `cleanup_inactive_members`)을 추가했다. 방장만 호출 가능하며 JWT 인증이 필요하다.
 - `20261006_public_rooms.sql`: `study_groups` 테이블에 `is_public` 플래그 및 인덱스를 추가하고, 공개 방 목록을 필터링·추천 정렬하는 `list_public_study_groups(user_timezone)` RPC와 `create_study_group` 공개 플래그 파라미터를 추가했다.
 - `20261006_ten_minute_timeline.sql`: `get_group_activity_timeline` RPC의 활동 집계 단위를 기존 15분(하루 96칸)에서 10분(하루 144칸)으로 단축했다.
-- `20261006_display_name_validation.sql`: `public.profiles`의 `display_name`에 영문/숫자 2~16자(`^[a-zA-Z0-9]{2,16}$`) 또는 기본 익명 코드(`^[2-9A-HJ-NP-Z]{3}-[2-9A-HJ-NP-Z]{3}$`) 형식 제약 조건(`profiles_display_name_format_check`)을 추가했다.
 - `20261006_member_pokes.sql`: 방 멤버끼리 찌르기 RPC 2종(`poke_room_member`, `fetch_my_pokes`)과 `member_pokes` 테이블을 추가했다. 기존 RPC는 바뀌지 않는다. 미적용 서버에서도 새 애드온은 찌르기 버튼만 숨기고 정상 동작한다.
+- `20261007_update_room_public.sql`: 방장이 방의 공개/비공개(`is_public`) 상태를 전환하는 `update_room_public(target_group, new_is_public)` RPC를 추가했다. 미적용 서버에서는 공개 전환 시 `PGRST202` 오류가 발생한다.
+- `20261007_group_member_limit_ten.sql`: 스터디 방 최대 정원을 기존 8명에서 10명으로 확대했다 (`guard_study_group_membership`, `list_public_study_groups`).
+- `20261008_poke_hourly_limit_sixty.sql`: 보낸 사람 기준 1시간당 찌르기 제한 횟수를 기존 30회에서 60회로 완화했다.
+- `실시간 Presence dnd 규격`: `room:{group_id}` 채널의 presence 메타데이터에 방해 금지 모드 여부를 나타내는 `dnd` (boolean) 필드가 추가되었다.
 
 웹 또는 별도 클라이언트는 [공개 API 계약](PUBLIC_API_CONTRACT.md)을 기준으로 RPC를 호출해야 한다. 익명 API 키는 프로젝트 식별용이며 사용자 권한을 대신하지 않으므로, 모든 사용자 작업에는 해당 사용자의 JWT가 필요하다.
 
