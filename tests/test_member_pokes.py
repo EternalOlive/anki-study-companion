@@ -15,6 +15,7 @@ from study_companion import api
 from study_companion.online import PokeUnavailable, SupabaseClient, SupabaseError
 from study_companion.pokes import (
     POKE_COOLDOWN_SECONDS,
+    POKE_HOURLY_LIMIT,
     POKE_UNAVAILABLE_RETRY_SECONDS,
     poke_message,
 )
@@ -281,7 +282,7 @@ class ControllerPokeTests(unittest.TestCase):
         cls.tooltips = []
         cls.Controller = _load_class_methods(
             "study_companion/addon.py", "Controller",
-            {"pokes_available", "_disable_pokes", "poke_member", "show_pokes"},
+            {"pokes_available", "_disable_pokes", "poke_member", "show_pokes", "is_do_not_disturb"},
             {
                 "time": time,
                 "tooltip": lambda message, period=3000: cls.tooltips.append(message),
@@ -294,6 +295,7 @@ class ControllerPokeTests(unittest.TestCase):
     def setUp(self):
         self.tooltips.clear()
         controller = self.Controller()
+        controller.ui_state = {"do_not_disturb": False}
         controller.online = {
             "auth": {"user_id": "me"},
             "group": {"id": "room-1"},
@@ -316,6 +318,9 @@ class ControllerPokeTests(unittest.TestCase):
         controller._run_authenticated_action = run
         self.controller = controller
 
+    def test_poke_hourly_limit_is_sixty(self):
+        self.assertEqual(POKE_HOURLY_LIMIT, 60)
+
     def test_poke_sends_and_confirms_with_tooltip(self):
         calls = []
         self.controller.client = SimpleNamespace(
@@ -330,6 +335,11 @@ class ControllerPokeTests(unittest.TestCase):
         self.assertFalse(self.controller.poke_member({"user_id": "me"}))
         self.controller.online["group"] = None
         self.assertFalse(self.controller.poke_member({"user_id": "friend"}))
+
+    def test_poke_refuses_member_in_do_not_disturb(self):
+        self.controller.client = SimpleNamespace(poke_room_member=lambda *args: self.fail("sent"))
+        self.assertFalse(self.controller.poke_member({"user_id": "friend", "display_name": "K7M-2RX", "dnd": True}))
+        self.assertEqual(self.tooltips, ["K7M-2RX 님은 방해 금지 모드 중입니다."])
 
     def test_missing_server_rpc_silently_disables_pokes(self):
         def missing(*args):
@@ -360,6 +370,11 @@ class ControllerPokeTests(unittest.TestCase):
         self.assertEqual(self.tooltips, ["K7M-2RX님, code:gone님이 콕 찔렀어요"])
         self.tooltips.clear()
         self.controller.show_pokes([])
+        self.assertEqual(self.tooltips, [])
+
+    def test_received_pokes_suppressed_in_do_not_disturb(self):
+        self.controller.ui_state["do_not_disturb"] = True
+        self.controller.show_pokes([{"from_user": "friend"}])
         self.assertEqual(self.tooltips, [])
 
 

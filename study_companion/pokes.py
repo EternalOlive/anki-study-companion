@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable
 # Matches the server rule: the same sender -> receiver pair in one room at most
 # once per 60 seconds. The panel disables that friend's button for this long.
 POKE_COOLDOWN_SECONDS = 60
+POKE_HOURLY_LIMIT = 60
 # When the server has no poke RPCs yet, stop calling them for this long. The
 # add-on retries later so a migration applied while Anki runs is picked up.
 POKE_UNAVAILABLE_RETRY_SECONDS = 30 * 60

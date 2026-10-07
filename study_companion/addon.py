@@ -61,7 +61,15 @@ from .realtime import (
     apply_presence_to_members,
     apply_review_tick_to_members,
 )
-from .room_activity import member_status, presence_status, shareable_deck_name
+from .confetti import trigger_confetti
+from .i18n import SUPPORTED_LOCALES
+from .room_activity import (
+    member_status,
+    presence_status,
+    ranked_places,
+    shareable_deck_name,
+    slot_rankings,
+)
 from .reviews import ReviewHistory
 from .study_day import (
     DEFAULT_TIME_ZONE,
@@ -71,6 +79,7 @@ from .study_day import (
     study_day,
     ten_minute_slot,
 )
+from .collapsed_strip import CollapsedStudyStrip
 from .panel import PanelToggleButton, StudyPanel
 from .tracker import (
     StudyTracker,
@@ -239,7 +248,7 @@ class Controller:
         if self.config_read_error is not None:
             self.record_status.set_error(LOCAL_READ, self.config_read_error)
         self.locale = data.get("language", "ko" if lang.current_lang.startswith("ko") else "en")
-        if self.locale not in ("ko", "en", "ja", "zh_CN"):
+        if self.locale not in SUPPORTED_LOCALES:
             self.locale = "ko"
         self.ui_state = data.get("ui_state", {})
         self.client = SupabaseClient()
@@ -260,6 +269,9 @@ class Controller:
         self.closed = False
         self.label = QLabel(mw)
         mw.statusBar().addPermanentWidget(self.label)
+        self.mini_study_badge = CollapsedStudyStrip(self, mw)
+        mw.statusBar().addPermanentWidget(self.mini_study_badge)
+        self.mini_study_badge.hide()
         self.action = mw.form.menuTools.addAction(self.t("스터디 관리", "Study settings"))
         self.action.triggered.connect(self.show_dialog)
         self._build_side_panel()
@@ -270,6 +282,9 @@ class Controller:
         self.timer.timeout.connect(self.tick)
         self.timer.start()
         self.ticks_since_save = 0
+        tz = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
+        self._last_ten_min_slot = ten_minute_slot(now(), tz)
+        self._celebrated_slots: set[tuple[str, int]] = set()
         self.refresh()
         QTimer.singleShot(0, self.refresh_review_history)
         QTimer.singleShot(1000, self.ensure_online_identity)
@@ -290,6 +305,9 @@ class Controller:
         self.timer.stop()
         QApplication.instance().removeEventFilter(self.watcher)
         mw.statusBar().removeWidget(self.label)
+        if hasattr(self, "mini_study_badge"):
+            mw.statusBar().removeWidget(self.mini_study_badge)
+            self.mini_study_badge.deleteLater()
         self.panel_expand.deleteLater()
         mw.form.menuTools.removeAction(self.action)
         mw.form.menuTools.removeAction(self.panel_action)
@@ -329,7 +347,8 @@ class Controller:
 
     def update_local_settings(
         self, *, time_goal_minutes=None, card_goal=None, locale=None,
-        share_deck_name=None,
+        share_deck_name=None, show_collapsed_strip=None, do_not_disturb=None,
+        celebrate_confetti=None,
     ):
         """Commit only explicitly edited fields, including settings-dialog drafts."""
         updates = {}
@@ -348,13 +367,31 @@ class Controller:
         previous_locale = self.locale
         had_share = "share_deck_name" in self.online
         previous_share = self.online.get("share_deck_name")
-        if locale is not None and locale not in ("ko", "en"):
+        ui_state = getattr(self, "ui_state", None)
+        if ui_state is None:
+            self.ui_state = ui_state = {}
+        had_strip = "show_collapsed_strip" in ui_state
+        previous_strip = ui_state.get("show_collapsed_strip", True)
+        had_dnd = "do_not_disturb" in ui_state
+        previous_dnd = ui_state.get("do_not_disturb", False)
+        had_confetti = "celebrate_confetti" in ui_state
+        previous_confetti = ui_state.get("celebrate_confetti", True)
+        if locale is not None and locale not in SUPPORTED_LOCALES:
             raise ValueError("invalid language")
         if share_deck_name is not None and not isinstance(share_deck_name, bool):
             raise ValueError("invalid sharing preference")
+        if show_collapsed_strip is not None and not isinstance(show_collapsed_strip, bool):
+            raise ValueError("invalid show_collapsed_strip preference")
+        if do_not_disturb is not None and not isinstance(do_not_disturb, bool):
+            raise ValueError("invalid do_not_disturb preference")
+        if celebrate_confetti is not None and not isinstance(celebrate_confetti, bool):
+            raise ValueError("invalid celebrate_confetti preference")
         changed = any(getattr(self.tracker, key) != value for key, value in updates.items())
         changed |= locale is not None and locale != self.locale
         changed |= share_deck_name is not None and share_deck_name != bool(previous_share)
+        changed |= show_collapsed_strip is not None and show_collapsed_strip != bool(previous_strip)
+        changed |= do_not_disturb is not None and do_not_disturb != bool(previous_dnd)
+        changed |= celebrate_confetti is not None and celebrate_confetti != bool(previous_confetti)
         if not changed:
             return False
         for key, value in updates.items():
@@ -363,6 +400,12 @@ class Controller:
             self.locale = locale
         if share_deck_name is not None:
             self.online["share_deck_name"] = share_deck_name
+        if show_collapsed_strip is not None:
+            self.ui_state["show_collapsed_strip"] = show_collapsed_strip
+        if do_not_disturb is not None:
+            self.ui_state["do_not_disturb"] = do_not_disturb
+        if celebrate_confetti is not None:
+            self.ui_state["celebrate_confetti"] = celebrate_confetti
         try:
             self.save()
         except Exception:
@@ -373,10 +416,39 @@ class Controller:
                 self.online["share_deck_name"] = previous_share
             else:
                 self.online.pop("share_deck_name", None)
+            if had_strip:
+                self.ui_state["show_collapsed_strip"] = previous_strip
+            else:
+                self.ui_state.pop("show_collapsed_strip", None)
+            if had_dnd:
+                self.ui_state["do_not_disturb"] = previous_dnd
+            else:
+                self.ui_state.pop("do_not_disturb", None)
+            if had_confetti:
+                self.ui_state["celebrate_confetti"] = previous_confetti
+            else:
+                self.ui_state.pop("celebrate_confetti", None)
             raise
         self.refresh()
         self.sync_async(force=True)
         return True
+
+    def is_do_not_disturb(self) -> bool:
+        ui_state = getattr(self, "ui_state", None)
+        if not isinstance(ui_state, dict):
+            return False
+        return bool(ui_state.get("do_not_disturb", False))
+
+    def toggle_do_not_disturb(self) -> bool:
+        new_val = not self.is_do_not_disturb()
+        self.update_local_settings(do_not_disturb=new_val)
+        msg = (
+            self.t("방해 금지 모드를 켰습니다. (찌르기 알림 끔)", "Do Not Disturb turned on.")
+            if new_val
+            else self.t("방해 금지 모드를 껐습니다.", "Do Not Disturb turned off.")
+        )
+        tooltip(msg, period=2000)
+        return new_val
 
     def invite_message(self, setup_url=None):
         return build_invite_message(
@@ -458,6 +530,7 @@ class Controller:
                 status=status,
                 current_deck_name=deck_name,
                 display_name=display_name,
+                dnd=self.is_do_not_disturb(),
             )
         else:
             realtime.leave_room()
@@ -476,6 +549,12 @@ class Controller:
             self.sync_async()
             self.ticks_since_save = 0
         self._sync_realtime_connection()
+        time_zone = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
+        curr_slot = ten_minute_slot(current, time_zone)
+        if curr_slot != getattr(self, "_last_ten_min_slot", curr_slot):
+            prev_slot = (curr_slot - 1) % 144
+            self._last_ten_min_slot = curr_slot
+            self._check_and_celebrate_slot(prev_slot, current)
         self.refresh()
 
     def input(self):
@@ -535,6 +614,7 @@ class Controller:
             f"{self.t('답변', 'Answers')} {answers}{card_goal}  {status}"
         )
         self.refresh_panel()
+        self.refresh_collapsed_strip()
 
     def study_record(self, current):
         day = study_day(current, self.tracker.time_zone).isoformat()
@@ -761,6 +841,7 @@ class Controller:
                     status=status,
                     current_deck_name=deck_name,
                     display_name=name,
+                    dnd=self.is_do_not_disturb(),
                 )
         self.refresh()
         return True
@@ -799,6 +880,7 @@ class Controller:
                     status=status,
                     current_deck_name=deck_name,
                     display_name=default_name,
+                    dnd=self.is_do_not_disturb(),
                 )
         self.refresh()
 
@@ -823,6 +905,9 @@ class Controller:
         if not group_id or not user_id or user_id == my_id or not self.pokes_available():
             return False
         name = self.display_member_name(member)
+        if member.get("dnd"):
+            tooltip(self.t(f"{name} 님은 방해 금지 모드 중입니다.", f"{name} is in Do Not Disturb mode."), period=3000)
+            return False
         unavailable = object()
 
         def operation(token):
@@ -846,6 +931,8 @@ class Controller:
 
     def show_pokes(self, pokes):
         """Show newly received pokes as one non-blocking tooltip."""
+        if self.is_do_not_disturb():
+            return
         members = {
             str(member.get("user_id")): member
             for member in (self.online.get("members") or [])
@@ -858,6 +945,58 @@ class Controller:
         message = poke_message(pokes, name_for, self.t)
         if message:
             tooltip(message, period=5000)
+
+    def _check_and_celebrate_slot(self, slot: int, current: datetime):
+        """Celebrate if current user ranked 1st (solo or tie) in the finished 10-min slot."""
+        if self.is_do_not_disturb():
+            return
+        ui_state = getattr(self, "ui_state", None)
+        if isinstance(ui_state, dict) and not ui_state.get("celebrate_confetti", True):
+            return
+        group = self.online.get("group")
+        if not group:
+            return
+        time_zone = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
+        today_iso = study_day(current, time_zone).isoformat()
+        slot_key = (today_iso, slot)
+        if slot_key in self._celebrated_slots:
+            return
+
+        auth = self.online.get("auth") or {}
+        my_id = str(auth.get("user_id") or "")
+        if not my_id:
+            return
+
+        members = self.online.get("members") or []
+        todays = [
+            m for m in members
+            if isinstance(m, dict) and m.get("user_id") and m.get("study_day") in (None, today_iso)
+        ]
+        if not any(m.get("activity_known") is True for m in todays):
+            return
+
+        rankings = slot_rankings(todays)
+        ranking = rankings.get(slot, [])
+        if not ranking:
+            return
+
+        places = ranked_places(ranking)
+        first_place_users = [user_id for place, user_id, _ans in places if place == 1]
+        if my_id in first_place_users:
+            my_entry = next((item for item in places if item[1] == my_id), None)
+            answers = my_entry[2] if my_entry else 0
+            if answers > 0:
+                self._celebrated_slots.add(slot_key)
+                is_tie = len(first_place_users) > 1
+                trigger_confetti(self, is_tie=is_tie, answers=answers)
+
+    def test_confetti(self):
+        """Trigger celebration confetti immediately for user testing."""
+        trigger_confetti(
+            self,
+            is_tie=False,
+            custom_message=self.t("축포 테스트! 1등 달성을 축하합니다!", "Confetti test! Congratulations on 1st place!"),
+        )
 
     def _build_side_panel(self):
         self.panel = QDockWidget(self.t("스터디", "Study"), mw)
@@ -935,6 +1074,25 @@ class Controller:
             self.save()
         if not collapsed and was_hidden and persist:
             self.sync_async(force=True)
+        self.refresh_collapsed_strip()
+
+    def is_panel_collapsed(self) -> bool:
+        if not hasattr(self, "panel"):
+            return False
+        return not self.panel.isVisible() or bool(self.ui_state.get("panel_collapsed"))
+
+    def refresh_collapsed_strip(self):
+        badge = getattr(self, "mini_study_badge", None)
+        if badge is None:
+            return
+        in_room = bool(self.online.get("group"))
+        collapsed = self.is_panel_collapsed()
+        enabled = bool(self.ui_state.get("show_collapsed_strip", True))
+        if in_room and collapsed and enabled:
+            badge.update_state()
+            badge.show()
+        else:
+            badge.hide()
 
     def refresh_panel(self):
         self.action.setText(self.t("스터디 관리", "Study settings"))

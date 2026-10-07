@@ -24,6 +24,7 @@ from aqt.qt import (
     QScrollArea,
     QSizePolicy,
     QPainter,
+    QPainterPath,
     QPalette,
     QPen,
     QPointF,
@@ -314,6 +315,8 @@ class PanelToggleButton(QToolButton):
         start, end = (18, 13) if self.expand else (13, 18)
         painter.drawLine(start, 11, end, 16)
         painter.drawLine(end, 16, start, 21)
+
+
 
 
 class ActivityTimeline(QWidget):
@@ -1017,6 +1020,16 @@ class MemberRow(QWidget):
         if not visible:
             return
         name = self.panel.member_name(member)
+        dnd = bool(member.get("dnd"))
+        if dnd:
+            self.poke.setEnabled(False)
+            tip = self.panel.tr(
+                f"{name} 님은 방해 금지 모드 중입니다.",
+                f"{name} is in Do Not Disturb mode.",
+            )
+            self.poke.setToolTip(tip)
+            self.poke.setAccessibleName(tip)
+            return
         cooling = self.panel.poke_cooling(member)
         text = self.panel.tr("찌르기", "Poke")
         self.poke.setText(text)
@@ -1085,10 +1098,11 @@ class MemberRow(QWidget):
         self.deck.setStyleSheet(f"color: {muted}; background: transparent;")
         status = self.panel.controller._current_member_status(member)
         name = self.panel.member_name(member)
+        dnd_marker = " " + self.panel.tr("[방해금지]", "[DND]") if member.get("dnd") else ""
         status_text = self.panel.status_text(status) if status in ("studying", "paused", "online") else ""
         status_suffix = f"  ·  {status_text}" if status_text else ""
         self.identity_text.setText(
-            f"{_allow_anywhere_wrap(name)}{status_suffix}  {'-' if self.expanded else '+'}"
+            f"{_allow_anywhere_wrap(name)}{dnd_marker}{status_suffix}  {'-' if self.expanded else '+'}"
         )
         self.identity.setToolTip(f"{name} · {status_text}" if status_text else name)
         self.panel.update_status_dot(self.dot, status)
@@ -1539,6 +1553,16 @@ class StudyPanel(QWidget):
         self.collapse_panel.setAccessibleName(collapse_text)
         self.expand_panel.setToolTip(expand_text)
         self.expand_panel.setAccessibleName(expand_text)
+        self.update_dnd_controls()
+
+    def _toggle_dnd(self) -> None:
+        toggle = getattr(self.controller, "toggle_do_not_disturb", None)
+        if callable(toggle):
+            toggle()
+        self.update_dnd_controls()
+
+    def update_dnd_controls(self) -> None:
+        pass
 
     def tr(self, ko: str, en: str) -> str:
         translate = getattr(self.controller, "t", None)
@@ -1607,6 +1631,10 @@ class StudyPanel(QWidget):
 
     def poke_member(self, member: dict) -> bool:
         if not self.can_poke(member) or self.poke_cooling(member):
+            return False
+        if member.get("dnd"):
+            name = self.member_name(member)
+            tooltip(self.tr(f"{name} 님은 방해 금지 모드 중입니다.", f"{name} is in Do Not Disturb mode."), period=3000)
             return False
         poke = getattr(self.controller, "poke_member", None)
         if not callable(poke) or poke(member) is False:

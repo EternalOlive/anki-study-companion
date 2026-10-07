@@ -21,6 +21,13 @@ def update_room_timezone(
     return client.update_room_timezone(token, group_id, timezone_name)
 
 
+def update_room_public(
+    client: SupabaseClient, token: str, group_id: str, is_public: bool
+) -> Any:
+    """Change the room public/private status (room owner only)."""
+    return client.update_room_public(token, group_id, is_public)
+
+
 def transfer_room_ownership(
     client: SupabaseClient, token: str, group_id: str, new_owner_id: str
 ) -> Any:
@@ -68,6 +75,7 @@ __all__ = [
     "SupabaseClient",
     "SupabaseError",
     "update_room_timezone",
+    "update_room_public",
     "transfer_room_ownership",
     "kick_room_member",
     "cleanup_inactive_members",

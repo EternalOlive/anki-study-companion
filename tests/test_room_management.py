@@ -102,6 +102,17 @@ class ApiRpcTests(unittest.TestCase):
         self.assertEqual(body["target_group"], "group-456")
         self.assertEqual(body["new_timezone"], "Asia/Tokyo")
 
+    def test_update_room_public_rpc(self):
+        opener = FakeOpener([None])
+        client = SupabaseClient(opener=opener)
+        api.update_room_public(client, "token-123", "group-456", True)
+
+        req = opener.calls[0][0]
+        self.assertTrue(urlparse(req.full_url).path.endswith("/rpc/update_room_public"))
+        body = body_of(req)
+        self.assertEqual(body["target_group"], "group-456")
+        self.assertTrue(body["new_is_public"])
+
     def test_transfer_room_ownership_rpc(self):
         opener = FakeOpener([None])
         client = SupabaseClient(opener=opener)
@@ -223,6 +234,13 @@ class MigrationFileCheckTests(unittest.TestCase):
         self.assertIn("cleanup_inactive_members", sql)
         self.assertIn("guard_study_group_calendar", sql)
 
+    def test_update_room_public_migration_exists(self):
+        migration_file = Path(__file__).parents[1] / "supabase" / "migrations" / "20261007_update_room_public.sql"
+        self.assertTrue(migration_file.exists(), "Update room public migration does not exist")
+        sql = migration_file.read_text(encoding="utf-8")
+        self.assertIn("update_room_public", sql)
+        self.assertIn("35FU", sql)
+
 
 class SettingsDialogExportTests(unittest.TestCase):
     def test_settings_dialog_exports_cleanly(self):
@@ -232,6 +250,7 @@ class SettingsDialogExportTests(unittest.TestCase):
             self.assertTrue(hasattr(SettingsDialog, "PAGE_HOME"))
             self.assertTrue(hasattr(SettingsDialog, "TAB_ROOM"))
             self.assertTrue(hasattr(SettingsDialog, "change_room_timezone"))
+            self.assertTrue(hasattr(SettingsDialog, "toggle_room_public"))
             self.assertTrue(hasattr(SettingsDialog, "transfer_ownership"))
             self.assertTrue(hasattr(SettingsDialog, "kick_member"))
             self.assertTrue(hasattr(SettingsDialog, "cleanup_inactive"))

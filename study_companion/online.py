@@ -436,8 +436,8 @@ class SupabaseClient:
                 ) from error
             if "study group is full" in str(error).casefold():
                 raise SupabaseError(
-                    "방 인원이 가득 찼습니다. 한 방에는 방장을 포함해 최대 8명까지 참여할 수 있습니다. / "
-                    "This room is full. A room can have up to 8 people including the owner.",
+                    "방 인원이 가득 찼습니다. 한 방에는 방장을 포함해 최대 10명까지 참여할 수 있습니다. / "
+                    "This room is full. A room can have up to 10 people including the owner.",
                     status=409,
                 ) from error
             raise
@@ -549,6 +549,19 @@ class SupabaseClient:
             body={
                 "target_group": group_id,
                 "new_timezone": str(timezone_name).strip(),
+            },
+        )
+
+    def update_room_public(
+        self, token: str, group_id: str, is_public: bool
+    ) -> Any:
+        return self._request(
+            "POST",
+            "/rest/v1/rpc/update_room_public",
+            token=token,
+            body={
+                "target_group": group_id,
+                "new_is_public": bool(is_public),
             },
         )
 
@@ -696,7 +709,7 @@ class SupabaseClient:
             query={
                 "select": (
                     "group_id,joined_at,"
-                    "study_groups(id,name,invite_code,owner_id,created_at,time_zone,day_start_hour)"
+                    "study_groups(id,name,invite_code,owner_id,created_at,time_zone,day_start_hour,is_public)"
                 ),
                 "user_id": f"eq.{user_id}",
                 "order": "joined_at.asc",

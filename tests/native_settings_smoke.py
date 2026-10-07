@@ -48,6 +48,11 @@ def _load_settings_types():
     qt.Qt = QtCore.Qt
     sys.modules["aqt"] = aqt
     sys.modules["aqt.qt"] = qt
+    utils = types.ModuleType("aqt.utils")
+    utils.tooltip = lambda *args, **kwargs: None
+    utils.showWarning = lambda *args, **kwargs: None
+    sys.modules["aqt.utils"] = utils
+    aqt.utils = utils
 
     package = types.ModuleType("study_companion")
     package.__path__ = [str(ROOT / "study_companion")]
@@ -100,6 +105,13 @@ class FakeClient:
 
     def leave_group(self, token, group_id):
         self.calls.append(("leave_group", token, group_id))
+
+    def update_room_public(self, token, group_id, is_public):
+        self.calls.append(("update_room_public", token, group_id, is_public))
+
+    def update_room_timezone(self, token, group_id, timezone_name):
+        self.calls.append(("update_room_timezone", token, group_id, timezone_name))
+
 
     def list_groups(self, token, user_id):
         self.calls.append(("list_groups", token, user_id))
@@ -235,6 +247,7 @@ class FakeController:
         self.applied_time_zones = []
         self.status_errors = {}
         self.pending = None
+        self.ui_state = {}
 
     def _access_token(self):
         return (self.online.get("auth") or {}).get("access_token")
@@ -255,6 +268,9 @@ class FakeController:
         card_goal=None,
         locale=None,
         share_deck_name=None,
+        show_collapsed_strip=None,
+        do_not_disturb=None,
+        celebrate_confetti=None,
     ):
         if time_goal_minutes is not None:
             self.tracker.time_goal_minutes = time_goal_minutes
@@ -264,10 +280,22 @@ class FakeController:
             self.locale = locale
         if share_deck_name is not None:
             self.online["share_deck_name"] = share_deck_name
+        if show_collapsed_strip is not None:
+            self.ui_state["show_collapsed_strip"] = show_collapsed_strip
+        if do_not_disturb is not None:
+            self.ui_state["do_not_disturb"] = do_not_disturb
+        if celebrate_confetti is not None:
+            self.ui_state["celebrate_confetti"] = celebrate_confetti
         self.save()
         self.refresh()
         self.sync_async(force=True)
         return True
+
+    def test_confetti(self):
+        self.confetti_tested = True
+
+    def is_do_not_disturb(self):
+        return bool(self.ui_state.get("do_not_disturb", False))
 
     def record_status_snapshot(self):
         room = self.online.get("group") or {}
@@ -421,13 +449,22 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     assert dialog.time_goal.value() == 300
     assert dialog.answer_goal.value() == 800
     assert dialog.language.currentData() == "en"
+    assert [dialog.language.itemData(i) for i in range(dialog.language.count())] == [
+        "ko", "en", "ja", "zh_CN", "es", "pt", "de", "fr"
+    ]
     assert dialog.share_deck_name.isChecked()
+    assert dialog.show_collapsed_strip.isChecked()
+    assert not dialog.do_not_disturb.isChecked()
+    assert dialog.celebrate_confetti.isChecked()
     assert not dialog.save_button.isEnabled()
 
     dialog.time_goal.setValue(320)
     dialog.answer_goal.setValue(850)
     dialog.language.setCurrentIndex(dialog.language.findData("ko"))
     dialog.share_deck_name.setChecked(False)
+    dialog.show_collapsed_strip.setChecked(False)
+    dialog.do_not_disturb.setChecked(True)
+    dialog.celebrate_confetti.setChecked(False)
     dialog.show_account()
     assert dialog.home_tabs.currentIndex() == dialog.TAB_ACCOUNT
     dialog.show_home()
@@ -436,6 +473,9 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     assert dialog.answer_goal.value() == 850
     assert dialog.language.currentData() == "ko"
     assert not dialog.share_deck_name.isChecked()
+    assert not dialog.show_collapsed_strip.isChecked()
+    assert dialog.do_not_disturb.isChecked()
+    assert not dialog.celebrate_confetti.isChecked()
     assert controller.locale == "en"
 
     settings_text = _visible_text(dialog, QtWidgets)
@@ -457,6 +497,9 @@ def check_home_draft_and_save(app, QtWidgets, SettingsDialog):
     assert controller.tracker.card_goal == 850
     assert controller.locale == "ko"
     assert controller.online["share_deck_name"] is False
+    assert controller.ui_state["show_collapsed_strip"] is False
+    assert controller.ui_state["do_not_disturb"] is True
+    assert controller.ui_state["celebrate_confetti"] is False
     assert controller.saved == 1 and controller.refreshed == 1
     assert controller.synced == [True]
     dialog.close()
@@ -547,6 +590,18 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert create_dialog.pages.currentIndex() == create_dialog.PAGE_HOME
     assert "America/New_York · 04:00" in _visible_text(create_dialog, QtWidgets)
     assert not create_dialog.room_time_zone.isVisible()
+    if create_controller.pending is not None:
+        create_controller.finish_remote()
+        app.processEvents()
+    assert create_dialog.room_is_public_checkbox is not None
+    assert create_dialog.room_is_public_checkbox.isChecked()
+    create_dialog.room_is_public_checkbox.setChecked(False)
+    app.processEvents()
+    assert create_controller.pending is not None
+    create_controller.finish_remote()
+    app.processEvents()
+    assert ("update_room_public", "token", "room-created", False) in create_controller.client.calls
+    assert create_controller.online["group"]["is_public"] is False
     create_dialog.close()
 
     controller = FakeController()
@@ -602,11 +657,14 @@ def check_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
         controller.finish_remote()
         app.processEvents()
 
+    assert dialog.room_is_public_checkbox is None
+    assert "비공개 방" in _visible_text(dialog, QtWidgets)
+
     _button(dialog, QtWidgets, "방 나가기").click()
     app.processEvents()
     assert dialog.pages.currentIndex() == dialog.PAGE_LEAVE
     assert "Quiet room" in _visible_text(dialog, QtWidgets)
-    assert "개인 공부 기록은 그대로" in _visible_text(dialog, QtWidgets)
+    assert "기록은 삭제됩니다" not in _visible_text(dialog, QtWidgets)
     dialog.leave_group()
     assert controller.pending is not None
     assert not dialog.leave_back.isEnabled()
@@ -648,7 +706,7 @@ def check_public_room_flows(app, QtWidgets, SettingsDialog, SupabaseError):
     assert ("list_public_study_groups", "token", "Asia/Seoul") in controller.client.calls
     visible = _visible_text(dialog, QtWidgets)
     assert "Public Study Room" in visible
-    assert "3/8" in visible
+    assert "3/10" in visible
 
     dialog.close()
 
@@ -1002,6 +1060,70 @@ def check_username_login_and_recovery(SettingsDialog):
     dialog.close()
 
 
+def check_collapsed_study_strip(app, QtWidgets):
+    from datetime import datetime, timezone
+    from study_companion.collapsed_strip import CollapsedStudyStrip, MiniStripWidget
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # 1. Solo user test
+    controller = FakeController(locale="ko")
+    controller.online["group"] = {"id": "room-1", "name": "Test Room"}
+    controller.online["auth"] = {"user_id": "u1"}
+    controller.online["members"] = [
+        {"user_id": "u1", "display_name": "Goyori", "status": "studying", "updated_at": now_iso, "answer_count": 42}
+    ]
+    strip = CollapsedStudyStrip(controller)
+    strip.show()
+    app.processEvents()
+
+    strip.update_state()
+    assert "온라인 1명" in strip.info_label.text()
+    assert "혼자 공부 중" in strip.info_label.text()
+    assert strip.dot_label.isVisible()
+
+    # 2. Multi-user test with leader
+    controller.online["members"] = [
+        {
+            "user_id": "u1",
+            "display_name": "Goyori",
+            "status": "studying",
+            "updated_at": now_iso,
+            "activity_known": True,
+            "activity_buckets": [{"slot": 48, "answer_count": 5}],
+        },
+        {
+            "user_id": "u2",
+            "display_name": "Friend1",
+            "status": "studying",
+            "updated_at": now_iso,
+            "activity_known": True,
+            "activity_buckets": [{"slot": 48, "answer_count": 15}],
+        },
+    ]
+    strip.update_state()
+    assert "온라인 2명" in strip.info_label.text()
+    assert "1위 Friend1 15개" in strip.info_label.text()
+    assert strip.strip_widget.isVisible()
+    assert strip.lead_uid == "u2"
+
+    # 3. Test poke trigger
+    poked = []
+    controller.pokes_available = lambda: True
+    controller.poke_member = lambda m: poked.append(m)
+    strip.trigger_poke()
+    assert len(poked) == 1
+    assert poked[0]["user_id"] == "u2"
+
+    # 4. English locale test
+    controller.locale = "en"
+    strip.update_state()
+    assert "Online 2" in strip.info_label.text()
+    assert "#1 Friend1 15" in strip.info_label.text()
+
+    strip.close()
+
+
 def main():
     QtGui, QtWidgets, SettingsDialog, SupabaseError = _load_settings_types()
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -1024,6 +1146,7 @@ def main():
     check_account_states(app, QtWidgets, SettingsDialog)
     check_username_account_creation(SettingsDialog, SupabaseError)
     check_username_login_and_recovery(SettingsDialog)
+    check_collapsed_study_strip(app, QtWidgets)
     screenshots = render_screenshots(app, QtGui, QtWidgets, SettingsDialog)
     screenshots.append(check_large_font_copy_layout(app, QtGui, SettingsDialog))
     print("native settings smoke ok")

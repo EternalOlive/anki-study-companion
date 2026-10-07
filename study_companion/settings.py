@@ -123,11 +123,24 @@ class SettingsDialog(QDialog):
         self._share_deck_at_open = bool(
             controller.online.get("share_deck_name", True)
         )
+        ui_state = getattr(controller, "ui_state", None)
+        if not isinstance(ui_state, dict):
+            ui_state = {}
+        self._show_collapsed_strip_at_open = bool(
+            ui_state.get("show_collapsed_strip", True)
+        )
+        self._do_not_disturb_at_open = bool(
+            ui_state.get("do_not_disturb", False)
+        )
+        self._celebrate_confetti_at_open = bool(
+            ui_state.get("celebrate_confetti", True)
+        )
         self._busy = False
         self._alive = True
         self._controller_signature = None
         self._copy_feedback_generation = {}
         self._members_loaded_context = None
+        self.room_is_public_checkbox = None
 
         self.setWindowTitle(self._t("스터디 관리", "Study settings"))
         self.setMinimumSize(440, 420)
@@ -423,12 +436,52 @@ class SettingsDialog(QDialog):
         language_form = QFormLayout()
         self.language = QComboBox(environment)
         self.language.setObjectName("language")
-        self.language.addItem("한국어", "ko")
-        self.language.addItem("English", "en")
-        self.language.addItem("日本語", "ja")
-        self.language.addItem("简体中文", "zh_CN")
+        for loc in i18n.SUPPORTED_LOCALES:
+            self.language.addItem(i18n.LOCALE_NAMES.get(loc, loc), loc)
         language_form.addRow(self._t("언어", "Language"), self.language)
         environment_layout.addLayout(language_form)
+        self.show_collapsed_strip = QCheckBox(
+            self._t("패널 접힘 시 하단에 스터디 요약 표시", "Show study strip at bottom when collapsed"),
+            environment,
+        )
+        self.show_collapsed_strip.setObjectName("showCollapsedStrip")
+        environment_layout.addWidget(self.show_collapsed_strip)
+        environment_layout.addWidget(
+            self._note(
+                self._t(
+                    "스터디 패널을 접었을 때 하단 상태 표시줄에 접속자 수, 1위 정보, 타임라인 띠 및 찌르기 버튼을 표시합니다.",
+                    "Shows online count, #1 leader, timeline strip, and poke button in the bottom status bar when the panel is collapsed.",
+                )
+            )
+        )
+        self.do_not_disturb = QCheckBox(
+            self._t("방해 금지 모드 (찌르기 알림 끄기)", "Do Not Disturb (Mute poke notifications)"),
+            environment,
+        )
+        self.do_not_disturb.setObjectName("doNotDisturb")
+        environment_layout.addWidget(self.do_not_disturb)
+        environment_layout.addWidget(
+            self._note(
+                self._t(
+                    "공부에 집중할 수 있도록 다른 멤버의 찌르기 알림을 화면에 띄우지 않습니다.",
+                    "Mute poke notifications on screen so you can focus on studying without distractions.",
+                )
+            )
+        )
+        self.celebrate_confetti = QCheckBox(
+            self._t("10분 구간 1등 시 축포 효과", "Celebrate 1st place in 10-min slot with confetti"),
+            environment,
+        )
+        self.celebrate_confetti.setObjectName("celebrateConfetti")
+        environment_layout.addWidget(self.celebrate_confetti)
+        environment_layout.addWidget(
+            self._note(
+                self._t(
+                    "방 멤버들과 학습 중 10분 구간에서 1등(또는 공동 1등)을 달성하면 미니 축포를 터트려 축하합니다.",
+                    "Fires a gentle confetti celebration when you achieve 1st place (or tied 1st) in a 10-minute study slot.",
+                )
+            )
+        )
         settings_tab_layout.addWidget(environment)
         settings_tab_layout.addStretch(1)
 
@@ -534,6 +587,9 @@ class SettingsDialog(QDialog):
         self.answer_goal.valueChanged.connect(self._update_save_enabled)
         self.language.currentIndexChanged.connect(self._update_save_enabled)
         self.share_deck_name.toggled.connect(self._update_save_enabled)
+        self.show_collapsed_strip.toggled.connect(self._update_save_enabled)
+        self.do_not_disturb.toggled.connect(self._update_save_enabled)
+        self.celebrate_confetti.toggled.connect(self._update_save_enabled)
         self.home_tabs.currentChanged.connect(self._home_tab_changed)
         self.home_buttons.setVisible(False)
         self.close_button.setVisible(True)
@@ -678,14 +734,6 @@ class SettingsDialog(QDialog):
         font.setBold(True)
         self.leave_room_name.setFont(font)
         layout.addWidget(self.leave_room_name)
-        layout.addWidget(
-            self._note(
-                self._t(
-                    "이 방에 공유된 내 오늘 기록은 삭제됩니다. Anki에 저장된 개인 공부 기록은 그대로 남습니다.",
-                    "Your shared record for today will be removed from this room. Your personal study record in Anki will remain.",
-                )
-            )
-        )
         self.leave_error = self._error_label()
         layout.addWidget(self.leave_error)
         layout.addStretch(1)
@@ -894,6 +942,7 @@ class SettingsDialog(QDialog):
             group.get("owner_id"),
             group.get("time_zone"),
             group.get("day_start_hour"),
+            group.get("is_public"),
             online.get("display_name"),
             online.get("account_kind"),
             online.get("email"),
@@ -923,6 +972,7 @@ class SettingsDialog(QDialog):
         self.members_section.setVisible(False)
         self._members_loaded_context = None
         self.rotate_invite_button = None
+        self.room_is_public_checkbox = None
         group = self.controller.online.get("group")
         if group:
             time_zone = str(group.get("time_zone") or DEFAULT_TIME_ZONE)
@@ -997,6 +1047,49 @@ class SettingsDialog(QDialog):
                 )
             tz_row.addStretch(1)
             self.room_layout.addLayout(tz_row)
+
+            is_public = group.get("is_public")
+            if is_public is None:
+                is_public = (str(group.get("invite_code") or "").strip().upper() == "35FU")
+            is_public = bool(is_public)
+
+            public_row = QHBoxLayout()
+            if is_owner:
+                self.room_is_public_checkbox = QCheckBox(
+                    self._t(
+                        "공개 방으로 설정",
+                        "Make room public",
+                        ja="公開ルームに設定",
+                        zh_cn="设为公开房间",
+                    ),
+                    self,
+                )
+                self.room_is_public_checkbox.setObjectName("roomIsPublicCheckbox")
+                self.room_is_public_checkbox.setToolTip(
+                    self._t(
+                        "체크하면 누구나 공개 목록에서 이 방을 찾아 참여할 수 있습니다.",
+                        "When checked, anyone can find and join this room from the public list.",
+                        ja="チェックすると、誰でも公開リストからこのルームを見つけて参加できます。",
+                        zh_cn="勾选后，任何人均可在公开列表中查找并加入此房间。",
+                    )
+                )
+                self.room_is_public_checkbox.setChecked(is_public)
+                self.room_is_public_checkbox.toggled.connect(self.toggle_room_public)
+                public_row.addWidget(self.room_is_public_checkbox)
+            else:
+                status_text = (
+                    self._t("공개 방 (누구나 참여 가능)", "Public room", ja="公開ルーム", zh_cn="公开房间")
+                    if is_public
+                    else self._t("비공개 방 (초대 코드로만 참여 가능)", "Private room (invite code only)", ja="非公開ルーム（招待コードのみ）", zh_cn="私密房间（仅限邀请码）")
+                )
+                public_label = QLabel(
+                    f"{self._t('공개 여부', 'Visibility', ja='公開設定', zh_cn='公开状态')}: {status_text}",
+                    self,
+                )
+                public_label.setStyleSheet("color: #666;")
+                public_row.addWidget(public_label)
+            public_row.addStretch(1)
+            self.room_layout.addLayout(public_row)
 
             if is_owner:
                 owner_actions = QHBoxLayout()
@@ -1565,6 +1658,66 @@ class SettingsDialog(QDialog):
             ),
         )
 
+    def toggle_room_public(self, checked: bool = True):
+        group = self.controller.online.get("group") or {}
+        group_id = str(group.get("id") or "")
+        user_id = (self.controller.online.get("auth") or {}).get("user_id")
+        if (
+            not group_id
+            or not user_id
+            or group.get("owner_id") != user_id
+            or not hasattr(self, "room_is_public_checkbox")
+            or self.room_is_public_checkbox is None
+        ):
+            return
+
+        is_currently_public = bool(group.get("is_public", False))
+        if bool(checked) == is_currently_public:
+            return
+
+        err_label = getattr(self, "members_error", None) or getattr(self, "home_error", None)
+        if not self._begin_remote(err_label):
+            if hasattr(self, "room_is_public_checkbox") and self.room_is_public_checkbox is not None:
+                self.room_is_public_checkbox.blockSignals(True)
+                self.room_is_public_checkbox.setChecked(is_currently_public)
+                self.room_is_public_checkbox.blockSignals(False)
+            return
+
+        def operation(token):
+            self.controller.client.update_room_public(token, group_id, bool(checked))
+            return bool(checked)
+
+        def success(new_status):
+            self._finish_remote()
+            if not self._valid():
+                return
+            group["is_public"] = bool(new_status)
+            self.controller.online["group"] = group
+            if hasattr(self.controller, "save"):
+                self.controller.save()
+            elif hasattr(self.controller, "_save_online"):
+                self.controller._save_online()
+            self._controller_signature = None
+            self.refresh_from_controller()
+
+        def failure(error_msg):
+            self._finish_remote()
+            if not self._valid():
+                return
+            if hasattr(self, "room_is_public_checkbox") and self.room_is_public_checkbox is not None:
+                self.room_is_public_checkbox.blockSignals(True)
+                self.room_is_public_checkbox.setChecked(is_currently_public)
+                self.room_is_public_checkbox.blockSignals(False)
+            self._set_message(err_label, str(error_msg or ""))
+
+        self.controller._run_authenticated_action(
+            [self.room_is_public_checkbox],
+            operation,
+            success,
+            self._t("공개 설정을 변경하지 못했습니다.", "Could not update public room status."),
+            on_error=failure,
+        )
+
     def transfer_ownership(self, group_id, owner_id, target_user, name):
         if not self._same_owner_context(group_id, owner_id):
             self.show_home()
@@ -1810,11 +1963,25 @@ class SettingsDialog(QDialog):
         self.login_submit.setEnabled(acknowledged and not self._busy)
 
     def _has_changes(self):
+        if (
+            not hasattr(self, "time_goal")
+            or not hasattr(self, "answer_goal")
+            or not hasattr(self, "language")
+            or not hasattr(self, "share_deck_name")
+            or not hasattr(self, "show_collapsed_strip")
+            or not hasattr(self, "do_not_disturb")
+            or not hasattr(self, "celebrate_confetti")
+            or not hasattr(self, "_celebrate_confetti_at_open")
+        ):
+            return False
         return (
             self.time_goal.value() != self._time_at_open
             or self.answer_goal.value() != self._answers_at_open
             or self.language.currentData() != self._locale_at_open
             or self.share_deck_name.isChecked() != self._share_deck_at_open
+            or self.show_collapsed_strip.isChecked() != self._show_collapsed_strip_at_open
+            or self.do_not_disturb.isChecked() != self._do_not_disturb_at_open
+            or self.celebrate_confetti.isChecked() != self._celebrate_confetti_at_open
         )
 
     def _update_save_enabled(self, *_args):
@@ -1830,6 +1997,21 @@ class SettingsDialog(QDialog):
             self.controller.online.get("share_deck_name", True)
         )
         self.share_deck_name.setChecked(self._share_deck_at_open)
+        ui_state = getattr(self.controller, "ui_state", None)
+        if not isinstance(ui_state, dict):
+            ui_state = {}
+        self._show_collapsed_strip_at_open = bool(
+            ui_state.get("show_collapsed_strip", True)
+        )
+        self.show_collapsed_strip.setChecked(self._show_collapsed_strip_at_open)
+        self._do_not_disturb_at_open = bool(
+            ui_state.get("do_not_disturb", False)
+        )
+        self.do_not_disturb.setChecked(self._do_not_disturb_at_open)
+        self._celebrate_confetti_at_open = bool(
+            ui_state.get("celebrate_confetti", True)
+        )
+        self.celebrate_confetti.setChecked(self._celebrate_confetti_at_open)
         index = self.language.findData(self._locale_at_open)
         self.language.setCurrentIndex(max(index, 0))
         self._update_save_enabled()
@@ -1848,9 +2030,15 @@ class SettingsDialog(QDialog):
             )
         if self.share_deck_name.isChecked() != self._share_deck_at_open:
             changes["share_deck_name"] = self.share_deck_name.isChecked()
+        if self.show_collapsed_strip.isChecked() != self._show_collapsed_strip_at_open:
+            changes["show_collapsed_strip"] = self.show_collapsed_strip.isChecked()
+        if self.do_not_disturb.isChecked() != self._do_not_disturb_at_open:
+            changes["do_not_disturb"] = self.do_not_disturb.isChecked()
+        if self.celebrate_confetti.isChecked() != self._celebrate_confetti_at_open:
+            changes["celebrate_confetti"] = self.celebrate_confetti.isChecked()
         if self.language.currentData() != self._locale_at_open:
             locale = self.language.currentData()
-            changes["locale"] = locale if locale in ("ko", "en") else "ko"
+            changes["locale"] = locale if locale in i18n.SUPPORTED_LOCALES else "ko"
         try:
             self.controller.update_local_settings(**changes)
         except Exception as error:
@@ -2261,7 +2449,7 @@ class SettingsDialog(QDialog):
             status_label.setStyleSheet("color: #32734e;" if studying > 0 else "color: gray;")
             row_layout.addWidget(status_label)
 
-            count_label = QLabel(f"{members}/8", row_widget)
+            count_label = QLabel(f"{members}/10", row_widget)
             count_label.setToolTip(tz)
             row_layout.addWidget(count_label)
 

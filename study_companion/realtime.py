@@ -94,6 +94,8 @@ def _clean_peer_meta(meta: dict[str, Any], user_id: str) -> dict[str, Any]:
     cleaned = dict(meta)
     if "display_name" in cleaned and cleaned["display_name"] is not None:
         cleaned["display_name"] = sanitize_display_name(cleaned["display_name"], user_id)
+    if "dnd" in cleaned:
+        cleaned["dnd"] = bool(cleaned["dnd"])
     return cleaned
 
 
@@ -102,7 +104,7 @@ def apply_presence_to_members(
     presences: dict[str, dict[str, Any]],
     current_iso: str,
 ) -> bool:
-    """Update member online statuses, deck names, and display names from presence dictionary."""
+    """Update member online statuses, deck names, display names, and dnd from presence dictionary."""
     changed = False
     for member in members:
         uid = str(member.get("user_id") or "")
@@ -118,6 +120,11 @@ def apply_presence_to_members(
                 safe_name = sanitize_display_name(meta["display_name"], uid)
                 if member.get("display_name") != safe_name:
                     member["display_name"] = safe_name
+                    changed = True
+            if "dnd" in meta:
+                dnd_val = bool(meta["dnd"])
+                if member.get("dnd") != dnd_val:
+                    member["dnd"] = dnd_val
                     changed = True
             member["updated_at"] = current_iso
             member["deck_updated_at"] = current_iso
