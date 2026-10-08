@@ -1004,7 +1004,11 @@ class MemberRow(QWidget):
             + self.summary.horizontalSpacing()
         )
         identity_floor = max(110, self.fontMetrics().horizontalAdvance("MMMMMMMMMM"))
-        compact = self.width() < metrics_width + identity_floor + 34 + self._poke_reserve()
+        threshold = metrics_width + identity_floor + 34 + self._poke_reserve()
+        if self._compact:
+            compact = self.width() < threshold + 12
+        else:
+            compact = self.width() < threshold
         self._set_compact(compact)
 
     def _poke_reserve(self) -> int:
@@ -1049,13 +1053,16 @@ class MemberRow(QWidget):
     def _set_compact(self, compact: bool) -> None:
         rows = getattr(self.panel, "member_rows", {})
         show_columns = not compact and not any(row._compact for row in rows.values() if row is not self)
-        self.panel.time_column.setVisible(show_columns)
-        self.panel.answer_column.setVisible(show_columns)
+        if self.panel.time_column.isVisible() != show_columns:
+            self.panel.time_column.setVisible(show_columns)
+            self.panel.answer_column.setVisible(show_columns)
         poke_column = getattr(self.panel, "poke_column", None)
         if poke_column is not None:
             # Keeps the time/answer headings aligned above rows with a poke button.
             poke_column.setFixedWidth(self.poke.width())
-            poke_column.setVisible(show_columns and not self.poke.isHidden())
+            poke_visible = show_columns and not self.poke.isHidden()
+            if poke_column.isVisible() != poke_visible:
+                poke_column.setVisible(poke_visible)
         if compact == self._compact:
             return
         self._compact = compact
@@ -1198,7 +1205,7 @@ class StudyPanel(QWidget):
         self._record_issue: str | None = None
 
         self.setObjectName("study_companion_body")
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(160)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
         root = QVBoxLayout(self)
@@ -1453,7 +1460,7 @@ class StudyPanel(QWidget):
         self._apply_responsive_layout()
 
     def _apply_responsive_layout(self) -> None:
-        available = max(0, self.content.width() - 28)
+        available = max(0, self.width() - 28)
         own_needed = (
             max(self.own_time.sizeHint().width(), self.time_caption.sizeHint().width())
             + max(
@@ -1462,7 +1469,10 @@ class StudyPanel(QWidget):
             )
             + self.own_values.horizontalSpacing()
         )
-        own_compact = own_needed > available
+        if self._own_compact:
+            own_compact = available < own_needed + 14
+        else:
+            own_compact = available < own_needed
         if own_compact != self._own_compact:
             self._own_compact = own_compact
             for widget in (
@@ -1488,7 +1498,10 @@ class StudyPanel(QWidget):
             + self.best.sizeHint().width()
             + self.history_selector.horizontalSpacing()
         )
-        history_compact = history_needed > available
+        if self._history_compact:
+            history_compact = available < history_needed + 14
+        else:
+            history_compact = available < history_needed
         if history_compact != self._history_compact:
             self._history_compact = history_compact
             self.history_selector.removeWidget(self.yesterday)
@@ -1505,7 +1518,10 @@ class StudyPanel(QWidget):
             + self.join_room.sizeHint().width()
             + self.no_room_layout.horizontalSpacing()
         )
-        no_room_compact = no_room_needed > available
+        if self._no_room_compact:
+            no_room_compact = available < no_room_needed + 14
+        else:
+            no_room_compact = available < no_room_needed
         if no_room_compact != self._no_room_compact:
             self._no_room_compact = no_room_compact
             self.no_room_layout.removeWidget(self.create_room)
@@ -1542,7 +1558,7 @@ class StudyPanel(QWidget):
         self.collapsed = bool(collapsed)
         self.content.setVisible(not self.collapsed)
         self.expand_panel.setVisible(self.collapsed)
-        self.setMinimumWidth(36 if self.collapsed else 280)
+        self.setMinimumWidth(36 if self.collapsed else 160)
         self.setMaximumWidth(52 if self.collapsed else 16777215)
         self.update_collapse_controls()
 

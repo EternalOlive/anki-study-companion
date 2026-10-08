@@ -2,7 +2,7 @@
 
 방 중심 UI와 한국어·영어 설정을 구현했습니다. 설계 기준은 [DESIGN.md](DESIGN.md)에 정리했습니다.
 
-현재 베타 버전은 `0.1.8`입니다. 변경 내역은 [CHANGELOG.md](CHANGELOG.md), 실제 기기 배포 확인 항목은 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)를 참고하세요.
+현재 베타 버전은 `0.1.9`입니다. 변경 내역은 [CHANGELOG.md](CHANGELOG.md), 실제 기기 배포 확인 항목은 [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md)를 참고하세요.
 
 시간대 업데이트 후에는 방 참여자 모두 최신 애드온으로 업데이트하고 Anki를 재시작하세요. 예전 자정 기준 버전은 새벽 시간대 기록 업로드가 거절될 수 있습니다. 기존 일별 타이머 합계는 보존하지만 새 04:00 기준 덱 비교와 혼합하지 않으며, 오늘/주간 답변 기록은 Anki 원본에서 다시 계산합니다.
 

@@ -219,5 +219,91 @@ class SlotCelebrationLogicTests(unittest.TestCase):
         self.assertEqual(self.celebrations, [])
 
 
+class CardMilestoneCelebrationTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import ast
+        path = Path(__file__).parents[1] / "study_companion" / "addon.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        cls_node = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Controller"
+        )
+        fn_node = next(
+            node for node in cls_node.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_check_and_celebrate_cards"
+        )
+        cls.mock_trigger_confetti = Mock()
+        scope = {
+            "trigger_confetti": cls.mock_trigger_confetti,
+            "datetime": datetime,
+            "max": max,
+            "int": int,
+            "getattr": getattr,
+        }
+        exec(compile(ast.Module(body=[fn_node], type_ignores=[]), str(path), "exec"), scope)
+        cls._fn = scope["_check_and_celebrate_cards"]
+
+    def setUp(self):
+        self.mock_trigger_confetti.reset_mock()
+
+    def make_controller(self, today_answers=0, dnd=False, celebrate=True):
+        controller = SimpleNamespace()
+        controller.is_do_not_disturb = lambda: dnd
+        controller.ui_state = {"celebrate_confetti": celebrate}
+        controller._answers = today_answers
+        controller.study_record = lambda dt: {"answers": controller._answers}
+        controller.tracker = SimpleNamespace(today=lambda dt: {"answers": controller._answers})
+        controller._last_celebrated_card_milestone = (today_answers // 100) * 100
+        controller.t = lambda ko, en, **kwargs: ko
+        controller._check_and_celebrate_cards = lambda current: self.__class__._fn(controller, current)
+        return controller
+
+    def test_milestone_triggers_every_hundred_cards(self):
+        controller = self.make_controller(today_answers=99)
+        now_dt = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
+
+        # 99 cards -> no trigger
+        controller._check_and_celebrate_cards(now_dt)
+        self.mock_trigger_confetti.assert_not_called()
+
+        # 100 cards -> triggers 100 milestone
+        controller._answers = 100
+        controller._check_and_celebrate_cards(now_dt)
+        self.assertEqual(self.mock_trigger_confetti.call_count, 1)
+        msg = self.mock_trigger_confetti.call_args[1]["custom_message"]
+        self.assertIn("100개", msg)
+        self.assertEqual(controller._last_celebrated_card_milestone, 100)
+
+        # 101 cards -> does not trigger again
+        controller._answers = 101
+        controller._check_and_celebrate_cards(now_dt)
+        self.assertEqual(self.mock_trigger_confetti.call_count, 1)
+
+        # 200 cards -> triggers 200 milestone
+        controller._answers = 200
+        controller._check_and_celebrate_cards(now_dt)
+        self.assertEqual(self.mock_trigger_confetti.call_count, 2)
+        msg2 = self.mock_trigger_confetti.call_args[1]["custom_message"]
+        self.assertIn("200개", msg2)
+        self.assertEqual(controller._last_celebrated_card_milestone, 200)
+
+    def test_milestone_suppressed_by_dnd(self):
+        controller = self.make_controller(today_answers=100, dnd=True)
+        now_dt = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
+        controller._last_celebrated_card_milestone = 0
+
+        controller._check_and_celebrate_cards(now_dt)
+        self.mock_trigger_confetti.assert_not_called()
+
+    def test_milestone_suppressed_by_setting(self):
+        controller = self.make_controller(today_answers=100, celebrate=False)
+        now_dt = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
+        controller._last_celebrated_card_milestone = 0
+
+        controller._check_and_celebrate_cards(now_dt)
+        self.mock_trigger_confetti.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

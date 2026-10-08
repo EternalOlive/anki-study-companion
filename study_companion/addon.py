@@ -281,10 +281,14 @@ class Controller:
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.tick)
         self.timer.start()
-        self.ticks_since_save = 0
         tz = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
         self._last_ten_min_slot = ten_minute_slot(now(), tz)
         self._celebrated_slots: set[tuple[str, int]] = set()
+        init_answers = max(
+            int(self.study_record(now()).get("answers") or 0),
+            int(self.tracker.today(now()).get("answers") or 0),
+        )
+        self._last_celebrated_card_milestone: int = (init_answers // 100) * 100
         self.refresh()
         QTimer.singleShot(0, self.refresh_review_history)
         QTimer.singleShot(1000, self.ensure_online_identity)
@@ -586,6 +590,7 @@ class Controller:
         if getattr(self, "realtime", None) and self.realtime.is_connected():
             slot = ten_minute_slot(current, getattr(self.tracker, "time_zone", "Asia/Seoul"))
             self.realtime.broadcast_review_tick(slot=slot, count=1, time_ms=0)
+        self._check_and_celebrate_cards(current)
         self.refresh()
 
     def state_changed(self, new_state, old_state):
@@ -990,6 +995,35 @@ class Controller:
                 is_tie = len(first_place_users) > 1
                 trigger_confetti(self, is_tie=is_tie, answers=answers)
 
+    def _check_and_celebrate_cards(self, current: datetime):
+        """Celebrate every 100 cards studied today."""
+        if self.is_do_not_disturb():
+            return
+        ui_state = getattr(self, "ui_state", None)
+        if isinstance(ui_state, dict) and not ui_state.get("celebrate_confetti", True):
+            return
+        today_answers = max(
+            int(self.study_record(current).get("answers") or 0),
+            int(self.tracker.today(current).get("answers") or 0),
+        )
+        last_milestone = getattr(self, "_last_celebrated_card_milestone", 0)
+        if today_answers < last_milestone:
+            last_milestone = (today_answers // 100) * 100
+            self._last_celebrated_card_milestone = last_milestone
+
+        milestone = (today_answers // 100) * 100
+        if milestone >= 100 and milestone > last_milestone:
+            self._last_celebrated_card_milestone = milestone
+            trigger_confetti(
+                self,
+                custom_message=self.t(
+                    f"오늘 카드 {milestone}개 학습 달성!",
+                    f"Reached {milestone} cards studied today!",
+                    ja=f"今日カード{milestone}枚学習達成！",
+                    zh_cn=f"今天已学习{milestone}张卡片！",
+                ),
+            )
+
     def test_confetti(self):
         """Trigger celebration confetti immediately for user testing."""
         trigger_confetti(
@@ -1014,6 +1048,7 @@ class Controller:
         self.panel.setTitleBarWidget(title_bar)
         self.panel_scroll = QScrollArea(self.panel)
         self.panel_scroll.setWidgetResizable(True)
+        self.panel_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.panel_scroll.setMinimumWidth(0)
         self.panel_scroll.setWidget(self.panel_body)
         self.panel.setWidget(self.panel_scroll)
