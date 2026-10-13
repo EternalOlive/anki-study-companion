@@ -555,15 +555,23 @@ class SupabaseClient:
     def update_room_public(
         self, token: str, group_id: str, is_public: bool
     ) -> Any:
-        return self._request(
-            "POST",
-            "/rest/v1/rpc/update_room_public",
-            token=token,
-            body={
-                "target_group": group_id,
-                "new_is_public": bool(is_public),
-            },
-        )
+        try:
+            return self._request(
+                "POST",
+                "/rest/v1/rpc/update_room_public",
+                token=token,
+                body={
+                    "target_group": group_id,
+                    "new_is_public": bool(is_public),
+                },
+            )
+        except SupabaseError as error:
+            if _is_missing_rpc(error):
+                raise SupabaseError(
+                    "서버에 공개 방 설정 기능이 아직 적용되지 않았습니다. / Public room feature is not available on this server yet.",
+                    status=404,
+                )
+            raise
 
     def transfer_room_ownership(
         self, token: str, group_id: str, new_owner_id: str

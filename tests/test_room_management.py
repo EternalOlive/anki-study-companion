@@ -113,6 +113,20 @@ class ApiRpcTests(unittest.TestCase):
         self.assertEqual(body["target_group"], "group-456")
         self.assertTrue(body["new_is_public"])
 
+    def test_update_room_public_rpc_missing_on_server(self):
+        err = HTTPError(
+            "https://example.com/rpc/update_room_public",
+            404,
+            "PGRST202",
+            {},
+            io.BytesIO(b'{"code":"PGRST202","message":"Could not find the function"}'),
+        )
+        opener = FakeOpener([err])
+        client = SupabaseClient(opener=opener)
+        with self.assertRaises(SupabaseError) as cm:
+            api.update_room_public(client, "token-123", "group-456", True)
+        self.assertIn("공개 방 설정 기능이 아직 적용되지 않았습니다", str(cm.exception))
+
     def test_transfer_room_ownership_rpc(self):
         opener = FakeOpener([None])
         client = SupabaseClient(opener=opener)

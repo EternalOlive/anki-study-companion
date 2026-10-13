@@ -280,6 +280,7 @@ class Controller:
         self.timer = QTimer(mw)
         self.timer.setInterval(1000)
         self.timer.timeout.connect(self.tick)
+        self.ticks_since_save = 0
         self.timer.start()
         tz = getattr(self.tracker, "time_zone", DEFAULT_TIME_ZONE)
         self._last_ten_min_slot = ten_minute_slot(now(), tz)

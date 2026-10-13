@@ -109,6 +109,28 @@ class ControllerGoalTests(unittest.TestCase):
                 controller.record_status.snapshot()["primary_issue"], LOCAL_SAVE
             )
 
+    def test_init_sets_ticks_since_save_in_ast(self):
+        path = Path(__file__).parents[1] / "study_companion" / "addon.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        controller_cls = next(
+            node for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "Controller"
+        )
+        init_fn = next(
+            node for node in controller_cls.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+        )
+        # Verify self.ticks_since_save = 0 is assigned in __init__
+        has_assignment = any(
+            isinstance(stmt, ast.Assign)
+            and any(
+                isinstance(t, ast.Attribute) and t.attr == "ticks_since_save"
+                for t in stmt.targets
+            )
+            for stmt in init_fn.body
+        )
+        self.assertTrue(has_assignment, "self.ticks_since_save must be initialized in Controller.__init__")
+
 
 if __name__ == "__main__":
     unittest.main()
